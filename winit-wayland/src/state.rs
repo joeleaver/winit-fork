@@ -18,6 +18,9 @@ use sctk::registry::{ProvidesRegistryState, RegistryState};
 use sctk::seat::SeatState;
 use sctk::seat::pointer::ThemedPointer;
 use sctk::shell::WaylandSurface;
+use sctk::shell::wlr_layer::{
+    LayerShell, LayerShellHandler, LayerSurface, LayerSurfaceConfigure,
+};
 use sctk::shell::xdg::XdgShell;
 use sctk::shell::xdg::window::{Window, WindowConfigure, WindowHandler};
 use sctk::shm::slot::SlotPool;
@@ -38,6 +41,7 @@ use crate::types::wp_tablet_input_v2::TabletManager;
 use crate::types::wp_viewporter::ViewporterState;
 use crate::types::xdg_activation::XdgActivationState;
 use crate::types::xdg_toplevel_icon_manager::XdgToplevelIconManagerState;
+use crate::window::layer_shell::SurfaceConfigure;
 use crate::window::{WindowRequests, WindowState};
 
 /// Winit's Wayland state.
@@ -63,6 +67,10 @@ pub struct WinitState {
 
     /// The XDG shell that is used for windows.
     pub xdg_shell: XdgShell,
+
+    /// The `wlr-layer-shell`, for windows asked to be layer surfaces; `None` when the
+    /// compositor has no `zwlr_layer_shell_v1` (GNOME/Mutter).
+    pub layer_shell: Option<LayerShell>,
 
     /// The currently present windows.
     pub windows: RefCell<AHashMap<WindowId, Arc<Mutex<WindowState>>>>,
@@ -207,6 +215,7 @@ impl WinitState {
             shm,
 
             xdg_shell: XdgShell::bind(globals, queue_handle).map_err(|err| os_error!(err))?,
+            layer_shell: LayerShell::bind(globals, queue_handle).ok(),
             xdg_activation: XdgActivationState::bind(globals, queue_handle).ok(),
             xdg_toplevel_icon_manager: XdgToplevelIconManagerState::bind(globals, queue_handle)
                 .ok(),
@@ -322,7 +331,33 @@ impl WindowHandler for WinitState {
         configure: WindowConfigure,
         _serial: u32,
     ) {
-        let window_id = super::make_wid(window.wl_surface());
+        self.surface_configure(window.wl_surface(), configure.into());
+    }
+}
+
+impl LayerShellHandler for WinitState {
+    fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, layer: &LayerSurface) {
+        let window_id = super::make_wid(layer.wl_surface());
+        Self::queue_close(&mut self.window_compositor_updates, window_id);
+    }
+
+    fn configure(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        layer: &LayerSurface,
+        configure: LayerSurfaceConfigure,
+        _serial: u32,
+    ) {
+        // sctk acks the configure; the size is applied like an xdg window's.
+        self.surface_configure(layer.wl_surface(), configure.into());
+    }
+}
+
+impl WinitState {
+    /// A configure for the window whose surface is `surface`, from either role.
+    fn surface_configure(&mut self, surface: &WlSurface, configure: SurfaceConfigure) {
+        let window_id = super::make_wid(surface);
 
         let pos = if let Some(pos) =
             self.window_compositor_updates.iter().position(|update| update.window_id == window_id)
@@ -484,3 +519,4 @@ sctk::delegate_registry!(WinitState);
 sctk::delegate_shm!(WinitState);
 sctk::delegate_xdg_shell!(WinitState);
 sctk::delegate_xdg_window!(WinitState);
+sctk::delegate_layer!(WinitState);

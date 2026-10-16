@@ -40,6 +40,10 @@ mod window;
 
 pub use self::event_loop::{ActiveEventLoop, EventLoop};
 pub use self::window::Window;
+pub use self::window::layer_shell::{
+    LayerShellAnchor, LayerShellAttributes, LayerShellKeyboardInteractivity, LayerShellLayer,
+    LayerShellMargins, WaylandSurfaceRole,
+};
 
 /// Additional methods on [`ActiveEventLoop`] that are specific to Wayland.
 pub trait ActiveEventLoopExtWayland {
@@ -76,14 +80,76 @@ pub trait EventLoopBuilderExtWayland {
 ///
 /// [`Window`]: crate::window::Window
 pub trait WindowExtWayland {
-    /// Returns `xdg_toplevel` of the window or [`None`] if the window is X11 window.
+    /// Returns `xdg_toplevel` of the window or [`None`] if the window is X11 window
+    /// (or a `wlr-layer-shell` surface).
     fn xdg_toplevel(&self) -> Option<NonNull<c_void>>;
+
+    /// The role the window's surface was given: [`None`] on X11. A window asked for a
+    /// layer-shell role ([`WindowAttributesWayland::with_layer_shell`]) answers
+    /// [`WaylandSurfaceRole::XdgToplevel`] when the compositor had no `zwlr_layer_shell_v1`.
+    fn wayland_surface_role(&self) -> Option<WaylandSurfaceRole>;
+
+    /// Change a layer surface's margins (logical px). Ignored by an xdg-toplevel.
+    /// Applied with the next commit, which this requests by asking for a redraw.
+    fn set_layer_shell_margins(&self, margins: LayerShellMargins);
+
+    /// Change a layer surface's anchors. Ignored by an xdg-toplevel.
+    fn set_layer_shell_anchor(&self, anchor: LayerShellAnchor);
+
+    /// Change a layer surface's layer. Ignored by an xdg-toplevel.
+    fn set_layer_shell_layer(&self, layer: LayerShellLayer);
+
+    /// Change a layer surface's keyboard interactivity. Ignored by an xdg-toplevel.
+    fn set_layer_shell_keyboard_interactivity(
+        &self,
+        interactivity: LayerShellKeyboardInteractivity,
+    );
+
+    /// Change a layer surface's exclusive zone. Ignored by an xdg-toplevel.
+    fn set_layer_shell_exclusive_zone(&self, zone: i32);
 }
 
 impl WindowExtWayland for dyn CoreWindow + '_ {
     #[inline]
     fn xdg_toplevel(&self) -> Option<NonNull<c_void>> {
         self.cast_ref::<Window>()?.xdg_toplevel()
+    }
+
+    fn wayland_surface_role(&self) -> Option<WaylandSurfaceRole> {
+        Some(self.cast_ref::<Window>()?.surface_role())
+    }
+
+    fn set_layer_shell_margins(&self, margins: LayerShellMargins) {
+        if let Some(window) = self.cast_ref::<Window>() {
+            window.update_layer_shell(|layer| layer.set_margins(margins));
+        }
+    }
+
+    fn set_layer_shell_anchor(&self, anchor: LayerShellAnchor) {
+        if let Some(window) = self.cast_ref::<Window>() {
+            window.update_layer_shell(|layer| layer.set_anchor(anchor));
+        }
+    }
+
+    fn set_layer_shell_layer(&self, layer: LayerShellLayer) {
+        if let Some(window) = self.cast_ref::<Window>() {
+            window.update_layer_shell(|surface| surface.set_layer(layer));
+        }
+    }
+
+    fn set_layer_shell_keyboard_interactivity(
+        &self,
+        interactivity: LayerShellKeyboardInteractivity,
+    ) {
+        if let Some(window) = self.cast_ref::<Window>() {
+            window.update_layer_shell(|layer| layer.set_keyboard_interactivity(interactivity));
+        }
+    }
+
+    fn set_layer_shell_exclusive_zone(&self, zone: i32) {
+        if let Some(window) = self.cast_ref::<Window>() {
+            window.update_layer_shell(|layer| layer.set_exclusive_zone(zone));
+        }
     }
 }
 
@@ -99,6 +165,7 @@ pub struct WindowAttributesWayland {
     pub(crate) name: Option<ApplicationName>,
     pub(crate) activation_token: Option<ActivationToken>,
     pub(crate) prefer_csd: bool,
+    pub(crate) layer_shell: Option<LayerShellAttributes>,
 }
 
 impl WindowAttributesWayland {
@@ -130,6 +197,21 @@ impl WindowAttributesWayland {
     #[inline]
     pub fn with_prefer_csd(mut self, prefer_csd: bool) -> Self {
         self.prefer_csd = prefer_csd;
+        self
+    }
+
+    /// Give the window a `wlr-layer-shell` role instead of an xdg-toplevel (a panel, a
+    /// dock, an overlay that never takes keyboard focus).
+    ///
+    /// When the compositor has no `zwlr_layer_shell_v1` (GNOME/Mutter) the window is an
+    /// ordinary xdg-toplevel, as without this call; [`WindowExtWayland::wayland_surface_role`]
+    /// says which one it got. A layer surface has no decorations, title, minimize, maximize,
+    /// fullscreen, compositor move or resize: `drag_window` and `drag_resize_window` return
+    /// [`NotSupportedError`](winit_core::error::NotSupportedError). Its size is the surface
+    /// size, requested with `request_surface_size`.
+    #[inline]
+    pub fn with_layer_shell(mut self, layer_shell: LayerShellAttributes) -> Self {
+        self.layer_shell = Some(layer_shell);
         self
     }
 }

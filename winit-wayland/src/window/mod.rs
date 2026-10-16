@@ -12,7 +12,7 @@ use sctk::reexports::client::protocol::wl_surface::WlSurface;
 use sctk::reexports::client::{Proxy, QueueHandle};
 use sctk::reexports::protocols::xdg::activation::v1::client::xdg_activation_v1::XdgActivationV1;
 use sctk::shell::WaylandSurface;
-use sctk::shell::xdg::window::{Window as SctkWindow, WindowDecorations};
+use sctk::shell::xdg::window::WindowDecorations;
 use tracing::warn;
 use winit_core::cursor::Cursor;
 use winit_core::error::{NotSupportedError, RequestError};
@@ -31,7 +31,9 @@ use super::output::MonitorHandle;
 use super::state::WinitState;
 use super::types::xdg_activation::XdgActivationTokenData;
 use crate::{WindowAttributesWayland, output};
+use layer_shell::{LayerShellAttributes, ShellSurface, WaylandSurfaceRole};
 
+pub(crate) mod layer_shell;
 pub(crate) mod state;
 
 pub use state::WindowState;
@@ -39,8 +41,8 @@ pub use state::WindowState;
 /// The Wayland window.
 #[derive(Debug)]
 pub struct Window {
-    /// Reference to the underlying SCTK window.
-    window: SctkWindow,
+    /// Reference to the underlying SCTK window or layer surface.
+    window: ShellSurface,
 
     /// Window id.
     window_id: WindowId,
@@ -103,14 +105,56 @@ impl Window {
             WindowDecorations::RequestClient
         };
 
-        let window =
-            state.xdg_shell.create_window(surface.clone(), default_decorations, &queue_handle);
+        let WindowAttributesWayland { name: app_name, activation_token, prefer_csd, layer_shell } =
+            *attributes
+                .platform
+                .take()
+                .and_then(|p| p.cast::<WindowAttributesWayland>().ok())
+                .unwrap_or_default();
 
-        let WindowAttributesWayland { name: app_name, activation_token, prefer_csd } = *attributes
-            .platform
-            .take()
-            .and_then(|p| p.cast::<WindowAttributesWayland>().ok())
-            .unwrap_or_default();
+        let window = match (layer_shell, state.layer_shell.as_ref()) {
+            (Some(layer_attributes), Some(layer_shell)) => {
+                let output = layer_attributes.output_name.as_deref().and_then(|name| {
+                    state.output_state.outputs().find(|output| {
+                        state.output_state.info(output).and_then(|info| info.name).as_deref()
+                            == Some(name)
+                    })
+                });
+                if layer_attributes.output_name.is_some() && output.is_none() {
+                    warn!(
+                        "no wl_output named {:?}; the compositor picks the layer surface's output",
+                        layer_attributes.output_name
+                    );
+                }
+                let layer = layer_shell.create_layer_surface(
+                    &queue_handle,
+                    surface.clone(),
+                    layer_attributes.sctk_layer(),
+                    Some(layer_attributes.namespace.clone()),
+                    output.as_ref(),
+                );
+                layer_attributes.apply(&layer);
+                // A size must be set before the first commit: a surface not anchored to two
+                // opposite edges may not ask for 0. The scale is not known yet; the first
+                // configure resizes it at the real one.
+                let initial = size.to_logical::<u32>(1.);
+                layer.set_size(initial.width.max(1), initial.height.max(1));
+                ShellSurface::Layer(layer, Box::new(layer_attributes))
+            },
+            (layer_shell, _) => {
+                if layer_shell.is_some() {
+                    warn!(
+                        "zwlr_layer_shell_v1 is not available; creating an xdg-toplevel instead \
+                         of a layer surface"
+                    );
+                }
+                ShellSurface::Xdg(state.xdg_shell.create_window(
+                    surface.clone(),
+                    default_decorations,
+                    &queue_handle,
+                ))
+            },
+        };
 
         let mut window_state = WindowState::new(
             event_loop_window_target.handle.clone(),
@@ -133,8 +177,8 @@ impl Window {
         window_state.set_decorate(attributes.decorations);
 
         // Set the app_id.
-        if let Some(name) = app_name.map(|name| name.general) {
-            window.set_app_id(name);
+        if let (Some(name), Some(xdg)) = (app_name.map(|name| name.general), window.xdg()) {
+            xdg.set_app_id(name);
         }
 
         // Set the window title.
@@ -150,7 +194,8 @@ impl Window {
         // Non-resizable implies that the min and max sizes are set to the same value.
         window_state.set_resizable(attributes.resizable);
 
-        // Set startup mode.
+        // Set startup mode (an xdg-toplevel's: a layer surface has none).
+        let startup_window = window.xdg().cloned();
         match attributes.fullscreen {
             Some(Fullscreen::Exclusive(..)) => {
                 warn!("`Fullscreen::Exclusive` is ignored on Wayland");
@@ -160,9 +205,15 @@ impl Window {
                     monitor.cast_ref::<output::MonitorHandle>().map(|handle| &handle.proxy)
                 });
 
-                window.set_fullscreen(output)
+                if let Some(window) = startup_window.as_ref() {
+                    window.set_fullscreen(output)
+                }
             },
-            _ if attributes.maximized => window.set_maximized(),
+            _ if attributes.maximized => {
+                if let Some(window) = startup_window.as_ref() {
+                    window.set_maximized()
+                }
+            },
             _ => (),
         };
 
@@ -226,7 +277,20 @@ impl Window {
     }
 
     pub(crate) fn xdg_toplevel(&self) -> Option<NonNull<c_void>> {
-        NonNull::new(self.window.xdg_toplevel().id().as_ptr().cast())
+        NonNull::new(self.window.xdg()?.xdg_toplevel().id().as_ptr().cast())
+    }
+
+    /// The role the window's surface was given.
+    pub(crate) fn surface_role(&self) -> WaylandSurfaceRole {
+        self.window.role()
+    }
+
+    /// Change a layer surface's attributes (nothing for an xdg-toplevel); applied with the
+    /// next commit, which a redraw request brings.
+    pub(crate) fn update_layer_shell(&self, update: impl FnOnce(&mut LayerShellAttributes)) {
+        if self.window_state.lock().unwrap().window.update_layer(update) {
+            self.request_redraw();
+        }
     }
 }
 
@@ -422,7 +486,9 @@ impl CoreWindow for Window {
             return;
         }
 
-        self.window.set_minimized();
+        if let Some(window) = self.window.xdg() {
+            window.set_minimized();
+        }
     }
 
     fn is_minimized(&self) -> Option<bool> {
@@ -431,7 +497,8 @@ impl CoreWindow for Window {
     }
 
     fn set_maximized(&self, maximized: bool) {
-        if maximized { self.window.set_maximized() } else { self.window.unset_maximized() }
+        let Some(window) = self.window.xdg() else { return };
+        if maximized { window.set_maximized() } else { window.unset_maximized() }
     }
 
     fn is_maximized(&self) -> bool {
@@ -454,9 +521,15 @@ impl CoreWindow for Window {
                     monitor.cast_ref::<output::MonitorHandle>().map(|handle| &handle.proxy)
                 });
 
-                self.window.set_fullscreen(output)
+                if let Some(window) = self.window.xdg() {
+                    window.set_fullscreen(output)
+                }
             },
-            None => self.window.unset_fullscreen(),
+            None => {
+                if let Some(window) = self.window.xdg() {
+                    window.unset_fullscreen()
+                }
+            },
         }
     }
 
