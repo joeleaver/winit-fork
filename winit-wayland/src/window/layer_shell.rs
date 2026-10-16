@@ -8,11 +8,17 @@
 //! `RedrawRequested` path — is the ordinary window's, so a renderer that presents to the raw
 //! `wl_surface` needs nothing special. A layer surface's configure carries only a size
 //! (`WindowState::configure_layer`): no state, no decorations, so no frame is made.
+//!
+//! Requests newer than the bound `zwlr_layer_shell_v1` version are not sent (that is a
+//! protocol error): `set_layer` needs v2, on-demand keyboard interactivity v4, which falls
+//! back to none below it.
 
+use sctk::reexports::client::Proxy;
 use sctk::reexports::client::protocol::wl_surface::WlSurface;
 use sctk::shell::WaylandSurface;
-use sctk::shell::wlr_layer::{Anchor, KeyboardInteractivity, Layer, LayerSurface};
+use sctk::shell::wlr_layer::{Anchor, KeyboardInteractivity, Layer, LayerSurface, SurfaceKind};
 use sctk::shell::xdg::window::Window;
+use tracing::warn;
 
 /// The role a Wayland window's surface was given.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -120,8 +126,14 @@ impl LayerShellAttributes {
     }
 
     /// Send every double-buffered request (applied with the next commit). The size is the
-    /// window state's own business (`WindowState::resize`).
-    pub(crate) fn apply(&self, surface: &LayerSurface) {
+    /// window state's own business (`WindowState::resize`). `layer_was`: the layer the
+    /// surface already has (`None` at creation, where `get_layer_surface` set it), so
+    /// `set_layer` is sent only for a change.
+    pub(crate) fn apply(&self, surface: &LayerSurface, layer_was: Option<LayerShellLayer>) {
+        let version = match surface.kind() {
+            SurfaceKind::Wlr(wlr) => wlr.version(),
+            _ => 1,
+        };
         let a = self.anchor;
         let mut anchor = Anchor::empty();
         anchor.set(Anchor::TOP, a.top);
@@ -134,10 +146,25 @@ impl LayerShellAttributes {
         surface.set_exclusive_zone(self.exclusive_zone);
         surface.set_keyboard_interactivity(match self.keyboard_interactivity {
             LayerShellKeyboardInteractivity::None => KeyboardInteractivity::None,
-            LayerShellKeyboardInteractivity::OnDemand => KeyboardInteractivity::OnDemand,
+            LayerShellKeyboardInteractivity::OnDemand if version >= 4 => {
+                KeyboardInteractivity::OnDemand
+            },
+            LayerShellKeyboardInteractivity::OnDemand => {
+                warn!(
+                    "zwlr_layer_surface_v1 v{version} has no on-demand keyboard interactivity \
+                     (v4); the layer surface takes no keyboard focus"
+                );
+                KeyboardInteractivity::None
+            },
             LayerShellKeyboardInteractivity::Exclusive => KeyboardInteractivity::Exclusive,
         });
-        surface.set_layer(self.sctk_layer());
+        if layer_was.is_some_and(|was| was != self.layer) {
+            if version >= 2 {
+                surface.set_layer(self.sctk_layer());
+            } else {
+                warn!("zwlr_layer_surface_v1 v{version} cannot change its layer (v2)");
+            }
+        }
     }
 }
 

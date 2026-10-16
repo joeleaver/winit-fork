@@ -62,8 +62,9 @@ impl WindowType {
     pub fn update_layer(&mut self, update: impl FnOnce(&mut LayerShellAttributes)) -> bool {
         match self {
             Self::Layer { layer, attributes, .. } => {
+                let layer_was = attributes.layer;
                 update(attributes);
-                attributes.apply(layer);
+                attributes.apply(layer, Some(layer_was));
                 true
             },
             _ => false,

@@ -109,7 +109,7 @@ impl Window {
                     Some(layer_attributes.namespace.clone()),
                     output.as_ref(),
                 );
-                layer_attributes.apply(&layer);
+                layer_attributes.apply(&layer, None);
                 // A size must be set before the first commit: a surface not anchored to two
                 // opposite edges may not ask for 0. The scale is not known yet; the first
                 // configure resizes it at the real one.
