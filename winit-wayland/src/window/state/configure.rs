@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use dpi::LogicalSize;
 use sctk::reexports::csd_frame::{DecorationsFrame, WindowState as XdgWindowState};
+use sctk::shell::wlr_layer::LayerSurfaceConfigure;
 use sctk::shell::xdg::popup::{ConfigureKind, PopupConfigure};
 use sctk::shell::xdg::window::{DecorationMode, WindowConfigure};
 use sctk::shm::Shm;
@@ -156,26 +157,65 @@ impl WindowState {
             && !configure.is_fullscreen()
             && !configure.is_tiled()
         {
-            if let Some(increments) = self.resize_increments {
-                // We use min size as a base size for the increments, similar to how X11 does it.
-                //
-                // This ensures that we can always reach the min size and the increments are
-                // calculated from it.
-                let (delta_width, delta_height) = (
-                    new_size.width.saturating_sub(self.min_surface_size.width),
-                    new_size.height.saturating_sub(self.min_surface_size.height),
-                );
-
-                let width = self.min_surface_size.width
-                    + (delta_width / increments.width) * increments.width;
-                let height = self.min_surface_size.height
-                    + (delta_height / increments.height) * increments.height;
-
-                new_size = (width, height).into();
-            }
+            new_size = self.snap_to_resize_increments(new_size);
         }
 
         new_size
+    }
+
+    /// `size` snapped down to the resize increments, from the min size.
+    fn snap_to_resize_increments(&self, size: LogicalSize<u32>) -> LogicalSize<u32> {
+        let Some(increments) = self.resize_increments else { return size };
+
+        // We use min size as a base size for the increments, similar to how X11 does it.
+        //
+        // This ensures that we can always reach the min size and the increments are
+        // calculated from it.
+        let (delta_width, delta_height) = (
+            size.width.saturating_sub(self.min_surface_size.width),
+            size.height.saturating_sub(self.min_surface_size.height),
+        );
+
+        let width =
+            self.min_surface_size.width + (delta_width / increments.width) * increments.width;
+        let height =
+            self.min_surface_size.height + (delta_height / increments.height) * increments.height;
+
+        (width, height).into()
+    }
+
+    /// A `wlr-layer-shell` surface's configure (rinch patch): only a size, `0` on an axis
+    /// meaning "you choose". Unless both are given the requested size is kept, snapped to the
+    /// resize increments; a layer surface has no states and no decorations.
+    pub fn configure_layer(&mut self, configure: LayerSurfaceConfigure) -> bool {
+        // NOTE: when using fractional scaling or wl_compositor@v6 the scaling
+        // should be delivered before the first configure, thus apply it to
+        // properly scale the physical sizes provided by the users.
+        if let Some(initial_size) = self.initial_size.take() {
+            self.size = initial_size.to_logical(self.scale_factor());
+            self.stateless_size = self.size;
+        }
+
+        let new_size = match configure.new_size {
+            (width, height) if width > 0 && height > 0 => (width, height).into(),
+            _ => self.snap_to_resize_increments(self.size),
+        };
+
+        if let WindowType::Layer { last_configure, .. } = &mut self.window {
+            // NOTE: `None` is present for the initial configure, thus we must always resize.
+            let initial = last_configure.is_none();
+            *last_configure = Some(configure);
+
+            if initial || new_size != self.surface_size() {
+                self.resize(new_size);
+                true
+            } else {
+                false
+            }
+        } else {
+            tracing::error!("configure_layer called for a window that is not a layer surface");
+            false
+        }
     }
 
     pub fn configure_window(

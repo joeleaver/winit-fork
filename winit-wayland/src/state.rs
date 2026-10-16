@@ -17,6 +17,7 @@ use sctk::registry::{ProvidesRegistryState, RegistryState};
 use sctk::seat::SeatState;
 use sctk::seat::pointer::ThemedPointer;
 use sctk::shell::WaylandSurface;
+use sctk::shell::wlr_layer::{LayerShell, LayerShellHandler, LayerSurface, LayerSurfaceConfigure};
 use sctk::shell::xdg::XdgShell;
 use sctk::shell::xdg::popup::{Popup as XdgPopup, PopupConfigure, PopupHandler};
 use sctk::shell::xdg::window::{Window, WindowConfigure, WindowHandler};
@@ -65,6 +66,10 @@ pub struct WinitState {
 
     /// The XDG shell that is used for windows.
     pub xdg_shell: XdgShell,
+
+    /// The `wlr-layer-shell`, for windows asked to be layer surfaces; `None` when the
+    /// compositor has no `zwlr_layer_shell_v1` (GNOME/Mutter).
+    pub layer_shell: Option<LayerShell>,
 
     /// The currently present windows.
     pub windows: RefCell<HashMap<WindowId, Arc<Mutex<WindowState>>>>,
@@ -208,6 +213,7 @@ impl WinitState {
             shm,
 
             xdg_shell: XdgShell::bind(globals, queue_handle).map_err(|err| os_error!(err))?,
+            layer_shell: LayerShell::bind(globals, queue_handle).ok(),
             xdg_activation: XdgActivationState::bind(globals, queue_handle).ok(),
             xdg_toplevel_icon_manager: XdgToplevelIconManagerState::bind(globals, queue_handle)
                 .ok(),
@@ -342,6 +348,55 @@ impl WindowHandler for WinitState {
             .lock()
             .unwrap()
             .configure_window(configure, &self.shm, &self.subcompositor_state);
+
+        // NOTE: configure demands wl_surface::commit, however winit doesn't commit on behalf of the
+        // users, since it can break a lot of things, thus it'll ask users to redraw instead.
+        self.window_requests
+            .get_mut()
+            .get(&window_id)
+            .unwrap()
+            .redraw_requested
+            .store(true, Ordering::Relaxed);
+
+        // Manually mark that we've got an event, since configure may not generate a resize.
+        self.dispatched_events = true;
+    }
+}
+
+impl LayerShellHandler for WinitState {
+    fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, layer: &LayerSurface) {
+        let window_id = super::make_wid(layer.wl_surface());
+        Self::queue_close(&mut self.window_compositor_updates, window_id);
+    }
+
+    fn configure(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        layer: &LayerSurface,
+        configure: LayerSurfaceConfigure,
+        _serial: u32,
+    ) {
+        // sctk acks the configure; the size is applied like an xdg window's.
+        let window_id = super::make_wid(layer.wl_surface());
+
+        let index = if let Some(index) =
+            self.window_compositor_updates.iter().position(|update| update.window_id == window_id)
+        {
+            index
+        } else {
+            self.window_compositor_updates.push(WindowCompositorUpdate::new(window_id));
+            self.window_compositor_updates.len() - 1
+        };
+
+        self.window_compositor_updates[index].resized |= self
+            .windows
+            .get_mut()
+            .get_mut(&window_id)
+            .expect("got configure for dead window.")
+            .lock()
+            .unwrap()
+            .configure_layer(configure);
 
         // NOTE: configure demands wl_surface::commit, however winit doesn't commit on behalf of the
         // users, since it can break a lot of things, thus it'll ask users to redraw instead.

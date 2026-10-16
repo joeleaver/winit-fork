@@ -18,7 +18,6 @@ use sctk::reexports::protocols::wp::viewporter::client::wp_viewport::WpViewport;
 use sctk::reexports::protocols::xdg::shell::client::xdg_toplevel::ResizeEdge as XdgResizeEdge;
 use sctk::seat::pointer::{PointerData, ThemedPointer};
 use sctk::shell::WaylandSurface;
-use sctk::shell::xdg::XdgSurface;
 use sctk::shell::xdg::window::WindowConfigure;
 use sctk::shm::slot::SlotPool;
 use tracing::{info, warn};
@@ -314,6 +313,11 @@ impl WindowState {
                     "drag_resize_window is not supported for WindowType::Popup",
                 )));
             },
+            WindowType::Layer { .. } => {
+                return Err(
+                    NotSupportedError::new("a layer surface has no compositor resize").into()
+                );
+            },
         };
 
         if let Some((seat, serial)) = &self.touch_down {
@@ -338,6 +342,9 @@ impl WindowState {
                 return Err(RequestError::NotSupported(NotSupportedError::new(
                     "drag_window is not supported for WindowType::Popup",
                 )));
+            },
+            WindowType::Layer { .. } => {
+                return Err(NotSupportedError::new("a layer surface has no compositor move").into());
             },
         };
 
@@ -444,6 +451,8 @@ impl WindowState {
                     popup.reposition(xdg_positioner, 0);
                 }
             },
+            // A layer surface has no states: its size is always the client's.
+            WindowType::Layer { .. } => self.resize(surface_size.to_logical(self.scale_factor())),
         }
 
         self.surface_size_physical()
@@ -478,13 +487,20 @@ impl WindowState {
         // Reload the hint.
         self.reload_transparency_hint();
 
-        // Set the window geometry.
-        self.window.xdg_surface().set_window_geometry(
-            x,
-            y,
-            outer_size.width as i32,
-            outer_size.height as i32,
-        );
+        // Set the window geometry, or a layer surface's size.
+        match &self.window {
+            WindowType::Layer { layer, .. } => layer.set_size(outer_size.width, outer_size.height),
+            window => {
+                if let Some(xdg_surface) = window.xdg_surface() {
+                    xdg_surface.set_window_geometry(
+                        x,
+                        y,
+                        outer_size.width as i32,
+                        outer_size.height as i32,
+                    );
+                }
+            },
+        }
 
         // Update the target viewport, this is used if and only if fractional scaling is in use.
         if let Some(viewport) = self.viewport.as_ref() {
@@ -545,7 +561,7 @@ impl WindowState {
     pub(crate) fn is_maximized(&self) -> bool {
         let last_configure = match &self.window {
             WindowType::Window { last_configure, .. } => last_configure,
-            WindowType::Popup { .. } => return false,
+            WindowType::Popup { .. } | WindowType::Layer { .. } => return false,
         };
         last_configure
             .as_ref()
