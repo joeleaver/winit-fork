@@ -285,11 +285,13 @@ impl Window {
         self.window.role()
     }
 
-    /// Change a layer surface's attributes (nothing for an xdg-toplevel); applied with the
-    /// next commit, which a redraw request brings.
+    /// Change a layer surface's attributes (nothing for an xdg-toplevel) and commit them
+    /// at once, with the buffer already attached: a move or a layer change needs no new
+    /// frame, and an app that draws nothing new would otherwise never apply it.
     pub(crate) fn update_layer_shell(&self, update: impl FnOnce(&mut LayerShellAttributes)) {
-        if self.window_state.lock().unwrap().window.update_layer(update) {
-            self.request_redraw();
+        let mut window_state = self.window_state.lock().unwrap();
+        if window_state.window.update_layer(update) {
+            window_state.window.wl_surface().commit();
         }
     }
 }
