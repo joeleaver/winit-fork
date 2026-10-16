@@ -101,7 +101,7 @@ pub trait WindowExtWayland {
     fn wayland_surface_role(&self) -> Option<WaylandSurfaceRole>;
 
     /// Change a layer surface's margins (logical px). Ignored by an xdg-toplevel.
-    /// Applied with the next commit, which this requests by asking for a redraw.
+    /// Committed at once (with the buffer already attached), so no new frame is needed.
     fn set_layer_shell_margins(&self, margins: LayerShellMargins);
 
     /// Change a layer surface's anchors. Ignored by an xdg-toplevel.
