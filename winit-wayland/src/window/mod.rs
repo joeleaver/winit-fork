@@ -299,11 +299,29 @@ impl Window {
     /// Change a layer surface's attributes (nothing for an xdg-toplevel) and commit them
     /// at once, with the buffer already attached: a move or a layer change needs no new
     /// frame, and an app that draws nothing new would otherwise never apply it.
+    ///
+    /// A change of margins (a move) is followed by a `wl_display.sync`, whose callback
+    /// pushes `WindowEvent::Moved` into the event stream once the compositor has the move
+    /// (see [`crate::types::layer_move`]).
     pub(crate) fn update_layer_shell(&self, update: impl FnOnce(&mut LayerShellAttributes)) {
         let Some(state) = self.common.state.upgrade() else { return };
         let mut window_state = state.lock().unwrap();
+        let margins_were = window_state.window.layer_margins();
         if window_state.window.update_layer(update) {
             window_state.window.wl_surface().commit();
+            let margins = window_state.window.layer_margins();
+            if let Some(m) = margins.filter(|m| Some(*m) != margins_were) {
+                let scale = window_state.scale_factor();
+                let position = PhysicalPosition::new(
+                    (m.left as f64 * scale).round() as i32,
+                    (m.top as f64 * scale).round() as i32,
+                );
+                let barrier = crate::types::layer_move::LayerMoveBarrier {
+                    window_id: self.common.window_id,
+                    position,
+                };
+                self.common.display.sync(&self.common.handles.queue_handle, barrier);
+            }
         }
     }
 }

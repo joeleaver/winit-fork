@@ -102,6 +102,11 @@ pub trait WindowExtWayland {
 
     /// Change a layer surface's margins (logical px). Ignored by an xdg-toplevel.
     /// Committed at once (with the buffer already attached), so no new frame is needed.
+    ///
+    /// A change is confirmed by a `WindowEvent::Moved` carrying the new top-left margins
+    /// (scaled to physical px), delivered in order with the pointer's events once the
+    /// compositor has processed the commit: pointer positions before it are over the
+    /// surface's old place, those after it over the new one.
     fn set_layer_shell_margins(&self, margins: LayerShellMargins);
 
     /// Change a layer surface's anchors. Ignored by an xdg-toplevel.

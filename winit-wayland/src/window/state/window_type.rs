@@ -7,7 +7,7 @@ use sctk::shell::xdg::{XdgPositioner, XdgSurface};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel};
 use winit_core::window::WindowPositioner;
 
-use crate::window::layer_shell::LayerShellAttributes;
+use crate::window::layer_shell::{LayerShellAttributes, LayerShellMargins};
 
 #[derive(Debug)]
 pub enum WindowType {
@@ -55,6 +55,14 @@ impl WindowType {
             Self::Window { window, .. } => Some(window.xdg_surface()),
             Self::Popup { popup, .. } => Some(popup.xdg_surface()),
             Self::Layer { .. } => None,
+        }
+    }
+
+    /// A layer surface's margins; `None` for any other role.
+    pub fn layer_margins(&self) -> Option<LayerShellMargins> {
+        match self {
+            Self::Layer { attributes, .. } => Some(attributes.margins),
+            _ => None,
         }
     }
 
