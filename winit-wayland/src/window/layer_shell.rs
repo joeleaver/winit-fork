@@ -197,6 +197,14 @@ impl ShellSurface {
         }
     }
 
+    /// A layer surface's margins; `None` for an xdg window.
+    pub fn layer_margins(&self) -> Option<LayerShellMargins> {
+        match self {
+            ShellSurface::Xdg(_) => None,
+            ShellSurface::Layer(_, attributes) => Some(attributes.margins),
+        }
+    }
+
     /// Change a layer surface's attributes and send them; `false` for an xdg window.
     pub fn update_layer(&mut self, update: impl FnOnce(&mut LayerShellAttributes)) -> bool {
         match self {
