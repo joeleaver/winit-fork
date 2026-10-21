@@ -16,8 +16,10 @@ use sctk::reexports::client::protocol::wl_data_device_manager::DndAction;
 use sctk::reexports::client::protocol::wl_data_source::WlDataSource;
 use sctk::reexports::client::protocol::wl_surface::WlSurface;
 use sctk::reexports::client::{Connection, Proxy, QueueHandle};
+use dpi::{LogicalPosition, PhysicalPosition};
 use tracing::{debug, warn};
 use winit_core::event::WindowEvent;
+use winit_core::window::WindowId;
 
 use crate::make_wid;
 use crate::state::WinitState;
@@ -130,6 +132,27 @@ fn read_from_fd(fd: OwnedFd) -> Vec<u8> {
     }
 }
 
+/// A `wl_data_device` position in physical pixels.
+///
+/// The `enter`, `motion` and drop coordinates are surface-local, in the
+/// surface's logical coordinate space, like a pointer's. They are scaled by
+/// the window's scale factor exactly as `pointer/mod.rs` scales a pointer
+/// position, so a drag and a pointer at one place report one position.
+fn dnd_position(scale_factor: f64, x: f64, y: f64) -> PhysicalPosition<f64> {
+    LogicalPosition::new(x, y).to_physical(scale_factor)
+}
+
+impl WinitState {
+    /// The scale factor of the window a drag is over; 1.0 for a window this
+    /// state does not know.
+    fn dnd_scale_factor(&mut self, window_id: WindowId) -> f64 {
+        self.windows
+            .get_mut()
+            .get(&window_id)
+            .map_or(1.0, |window| window.lock().unwrap().scale_factor())
+    }
+}
+
 impl DataDeviceHandler for WinitState {
     fn enter(
         &mut self,
@@ -169,10 +192,11 @@ impl DataDeviceHandler for WinitState {
         self.dnd_window = Some(window_id);
 
         if has_files {
+            let position = dnd_position(self.dnd_scale_factor(window_id), x, y);
             self.events_sink.push_window_event(
                 WindowEvent::DragEntered {
                     paths: Vec::new(),
-                    position: dpi::PhysicalPosition::new(x, y),
+                    position,
                 },
                 window_id,
             );
@@ -211,9 +235,10 @@ impl DataDeviceHandler for WinitState {
         }
 
         if let Some(window_id) = self.dnd_window {
+            let position = dnd_position(self.dnd_scale_factor(window_id), x, y);
             self.events_sink.push_window_event(
                 WindowEvent::DragMoved {
-                    position: dpi::PhysicalPosition::new(x, y),
+                    position,
                 },
                 window_id,
             );
@@ -248,7 +273,7 @@ impl DataDeviceHandler for WinitState {
 
         if let Some(offer) = offer {
             let paths = read_paths_from_offer(conn, &offer);
-            let position = dpi::PhysicalPosition::new(offer.x, offer.y);
+            let position = dnd_position(self.dnd_scale_factor(window_id), offer.x, offer.y);
 
             // Finish the DnD protocol.
             offer.finish();
@@ -377,5 +402,14 @@ mod tests {
         assert_eq!(percent_decode("/path/hello%20world"), "/path/hello world");
         assert_eq!(percent_decode("/path/%E4%B8%AD%E6%96%87"), "/path/中文");
         assert_eq!(percent_decode("/simple/path"), "/simple/path");
+    }
+
+    #[test]
+    fn a_dnd_position_is_scaled_like_a_pointers() {
+        // Surface-local (logical) 100.5, 40, off the identity scale.
+        let p = dnd_position(2.0, 100.5, 40.0);
+        assert_eq!((p.x, p.y), (201.0, 80.0));
+        let p = dnd_position(1.25, 100.5, 40.0);
+        assert_eq!((p.x, p.y), (125.625, 50.0));
     }
 }
