@@ -26,6 +26,7 @@ mod event_processor;
 pub mod ffi;
 mod ime;
 mod monitor;
+mod raw_duplicate;
 mod util;
 mod window;
 mod xdisplay;

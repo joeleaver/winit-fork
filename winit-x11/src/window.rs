@@ -352,6 +352,8 @@ impl Drop for Window {
         {
             c.ignore_error();
         }
+        // Destroying the grab window releases the grab.
+        xconn.clear_pointer_grab_window(window.xwindow);
     }
 }
 
@@ -1502,6 +1504,8 @@ impl UnownedWindow {
                 .unmap_window(self.xwindow)
                 .expect_then_ignore_error("Failed to call `xcb_unmap_window`");
             self.xconn.flush_requests().expect("Failed to call XUnmapWindow");
+            // The server releases a grab whose window stops being viewable.
+            self.xconn.clear_pointer_grab_window(self.xwindow);
             shared_state.visibility = Visibility::No;
         }
     }
@@ -1879,6 +1883,8 @@ impl UnownedWindow {
             .ungrab_pointer(x11rb::CURRENT_TIME)
             .expect_then_ignore_error("Failed to call `xcb_ungrab_pointer`");
         *grabbed_lock = CursorGrabMode::None;
+        // `UngrabPointer` releases this client's grab whichever window holds it.
+        self.xconn.set_pointer_grab_window(0);
 
         let result = match mode {
             CursorGrabMode::None => self
@@ -1937,6 +1943,9 @@ impl UnownedWindow {
 
         if result.is_ok() {
             *grabbed_lock = mode;
+            if mode == CursorGrabMode::Confined {
+                self.xconn.set_pointer_grab_window(self.xwindow);
+            }
         }
 
         result
