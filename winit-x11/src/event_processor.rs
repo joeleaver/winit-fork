@@ -42,6 +42,7 @@ use crate::event_loop::{
     ScrollOrientation, mkdid, mkwid,
 };
 use crate::ime::{ImeEvent, ImeEventReceiver, ImeReceiver, ImeRequest};
+use crate::raw_duplicate::{RawDuplicateFilter, RawEventView};
 use crate::util;
 use crate::util::cookie::GenericEventCookie;
 use crate::window::UnownedWindow;
@@ -81,6 +82,8 @@ pub struct EventProcessor {
     pub xfiltered_modifiers: VecDeque<u8>,
     pub xmodmap: util::ModifierKeymap,
     pub is_composing: bool,
+    /// Drops the second copy of each raw pointer event while a pointer grab is held (#2114).
+    pub raw_duplicates: RawDuplicateFilter,
 }
 
 impl EventProcessor {
@@ -261,11 +264,15 @@ impl EventProcessor {
                         };
 
                         let xev: &XIRawEvent = unsafe { xev.as_event() };
-                        self.xinput2_raw_button_input(xev, state, app);
+                        if !self.is_raw_grab_duplicate(evtype, xev) {
+                            self.xinput2_raw_button_input(xev, state, app);
+                        }
                     },
                     xinput2::XI_RawMotion => {
                         let xev: &XIRawEvent = unsafe { xev.as_event() };
-                        self.xinput2_raw_mouse_motion(xev, app);
+                        if !self.is_raw_grab_duplicate(evtype, xev) {
+                            self.xinput2_raw_mouse_motion(xev, app);
+                        }
                     },
                     xinput2::XI_RawKeyPress | xinput2::XI_RawKeyRelease => {
                         let state = match evtype {
@@ -275,6 +282,9 @@ impl EventProcessor {
                         };
 
                         let xev: &xinput2::XIRawEvent = unsafe { xev.as_event() };
+                        // Raw keys arrive once: winit never grabs the keyboard. A key between
+                        // two pointer events means they are not one delivery's two copies.
+                        self.raw_duplicates.interrupt();
                         self.xinput2_raw_key_input(xev, state, app);
                     },
 
@@ -1647,6 +1657,14 @@ impl EventProcessor {
                 _ => unreachable!(),
             }
         }
+    }
+
+    /// Whether `xev` is the second copy of a raw pointer event that the server delivered twice
+    /// because this client holds a pointer grab (rinch #2114; see `raw_duplicate`).
+    fn is_raw_grab_duplicate(&mut self, evtype: c_int, xev: &XIRawEvent) -> bool {
+        // SAFETY: `xev` is the data of a raw event cookie Xlib just delivered.
+        let view = unsafe { RawEventView::from_xi(evtype, xev) };
+        self.raw_duplicates.is_duplicate(&view, self.target.xconn.pointer_grabbed())
     }
 
     fn xinput2_raw_button_input(

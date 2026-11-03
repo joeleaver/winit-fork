@@ -414,6 +414,7 @@ impl EventLoop {
             active_window: None,
             modifiers: Default::default(),
             is_composing: false,
+            raw_duplicates: Default::default(),
         };
 
         // Register for device hotplug events

@@ -49,6 +49,12 @@ pub struct XConnection {
     /// The last timestamp received by this connection.
     timestamp: AtomicU32,
 
+    /// The window holding this client's active pointer grab (`CursorGrabMode::Confined`), or 0.
+    ///
+    /// While it is set the server delivers each raw pointer event twice (rinch #2114), and the
+    /// event processor drops the second copy; see `raw_duplicate`.
+    pointer_grab_window: AtomicU32,
+
     /// List of monitor handles.
     pub monitor_handles: Mutex<Option<Vec<MonitorHandle>>>,
 
@@ -178,6 +184,7 @@ impl XConnection {
             atoms: Box::new(atoms),
             default_screen,
             timestamp: AtomicU32::new(0),
+            pointer_grab_window: AtomicU32::new(0),
             latest_error: Mutex::new(None),
             monitor_handles: Mutex::new(None),
             database: RwLock::new(database),
@@ -272,6 +279,27 @@ impl XConnection {
 
     /// Set the last witnessed timestamp.
     #[inline]
+    /// Records that `window` now holds this client's pointer grab (0: no grab).
+    pub(crate) fn set_pointer_grab_window(&self, window: xproto::Window) {
+        self.pointer_grab_window.store(window, Ordering::Relaxed);
+    }
+
+    /// Records that the server released the pointer grab held by `window`, if it held it (the
+    /// window was destroyed or unmapped).
+    pub(crate) fn clear_pointer_grab_window(&self, window: xproto::Window) {
+        let _ = self.pointer_grab_window.compare_exchange(
+            window,
+            0,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+    }
+
+    /// Whether this client holds a pointer grab.
+    pub(crate) fn pointer_grabbed(&self) -> bool {
+        self.pointer_grab_window.load(Ordering::Relaxed) != 0
+    }
+
     pub fn set_timestamp(&self, timestamp: u32) {
         // Store the timestamp in the slot if it's greater than the last one.
         let mut last_timestamp = self.timestamp.load(Ordering::Relaxed);
