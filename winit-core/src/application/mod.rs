@@ -223,8 +223,8 @@ pub trait ApplicationHandler {
     ///
     /// - **Wayland:** emitted when a `wl_output` is advertised or withdrawn, and when an output's
     ///   information changes (its `wl_output.done`, which also follows an `xdg_output` change).
-    /// - **X11:** emitted on every RandR `RRScreenChangeNotify`, and on every change of the
-    ///   root's `RESOURCE_MANAGER` or the XSETTINGS (`Xft.dpi`, the monitors' scale factor).
+    /// - **X11:** emitted on every RandR `RRScreenChangeNotify`, and on every change of the root's
+    ///   `RESOURCE_MANAGER` or the XSETTINGS (`Xft.dpi`, the monitors' scale factor).
     /// - **Android / iOS / macOS / Orbital / Web / Windows:** Unsupported.
     fn monitors_changed(&mut self, event_loop: &dyn ActiveEventLoop) {
         let _ = event_loop;
