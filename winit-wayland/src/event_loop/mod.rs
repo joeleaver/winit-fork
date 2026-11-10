@@ -104,6 +104,9 @@ impl EventLoop {
         // NOTE: do a roundtrip after binding the globals to prevent potential
         // races with the server.
         event_queue.roundtrip(&mut winit_state).map_err(|err| os_error!(err))?;
+        // The outputs advertised so far are the ones the application finds when it starts; only
+        // later changes are announced.
+        winit_state.monitors_changed = false;
 
         // Register Wayland source.
         let wayland_source = WaylandSource::new(connection.clone(), event_queue);
@@ -366,6 +369,12 @@ impl EventLoop {
         // Indicate user wake up.
         if self.with_state(|state| mem::take(&mut state.proxy_wake_up)) {
             app.proxy_wake_up(&self.active_event_loop);
+        }
+
+        // Outputs added, removed or changed, before the windows' own updates (a scale change
+        // that came with the output's).
+        if self.with_state(|state| mem::take(&mut state.monitors_changed)) {
+            app.monitors_changed(&self.active_event_loop);
         }
 
         // Drain the pending compositor updates.

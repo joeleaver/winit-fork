@@ -279,6 +279,30 @@ impl EventLoop {
             error => os_error!(error).into(),
         })?;
 
+        // Hear the root's RESOURCE_MANAGER changes: `property_notify` takes one as a scale change
+        // (`Xft.dpi`, written by `xrdb`, and by KWin for Xwayland when an output's scale changes),
+        // but nothing selected property changes on the root, so only an XSETTINGS manager's change
+        // or the next RandR event was seen. Added to this client's mask, which the root keeps per
+        // client.
+        {
+            use xproto::ConnectionExt as _;
+            let conn = xconn.xcb_connection();
+            let mask = conn
+                .get_window_attributes(root)
+                .map_err(|err| os_error!(X11Error::from(err)))?
+                .reply()
+                .map_err(|err| os_error!(X11Error::from(err)))?
+                .your_event_mask;
+            conn.change_window_attributes(
+                root,
+                &xproto::ChangeWindowAttributesAux::new()
+                    .event_mask(mask | xproto::EventMask::PROPERTY_CHANGE),
+            )
+            .map_err(|err| os_error!(X11Error::from(err)))?
+            .check()
+            .map_err(|err| os_error!(X11Error::from(err)))?;
+        }
+
         let xi2ext = xconn
             .xcb_connection()
             .extension_information(xinput::X11_EXTENSION_NAME)

@@ -22,7 +22,7 @@ use std::ffi::c_void;
 use std::hash::BuildHasher;
 use std::ptr::NonNull;
 
-use dpi::{LogicalSize, PhysicalSize};
+use dpi::{LogicalPosition, LogicalSize, PhysicalSize};
 use sctk::reexports::client::Proxy;
 use sctk::reexports::client::backend::ObjectId;
 use sctk::reexports::client::protocol::wl_surface::WlSurface;
@@ -30,6 +30,7 @@ use sctk::shm::slot::{Buffer, CreateBufferError, SlotPool};
 use wayland_client::protocol::wl_shm::Format;
 use winit_core::data_transfer::DataTransferId;
 use winit_core::event_loop::ActiveEventLoop as CoreActiveEventLoop;
+use winit_core::monitor::MonitorHandleProvider;
 use winit_core::window::{
     ActivationToken, PlatformWindowAttributes, Window as CoreWindow, WindowId,
 };
@@ -49,6 +50,7 @@ mod window;
 
 pub use self::data_transfer::{DataOffer, DragSource, MimeData, MimeType};
 pub use self::event_loop::{ActiveEventLoop, EventLoop};
+use self::output::MonitorHandle;
 pub use self::popup::Popup;
 pub use self::window::Window;
 pub use self::window::layer_shell::{
@@ -192,6 +194,37 @@ impl WindowExtWayland for dyn CoreWindow + '_ {
         if let Some(window) = self.cast_ref::<Window>() {
             window.update_layer_shell(|layer| layer.set_changes(changes));
         }
+    }
+}
+
+/// Additional methods on [`MonitorHandle`] that are specific to Wayland.
+///
+/// [`MonitorHandle`]: winit_core::monitor::MonitorHandle
+pub trait MonitorHandleExtWayland {
+    /// The output's top-left in the compositor's logical (global) space: `xdg_output`'s
+    /// `logical_position`, the coordinates the compositor lays its outputs out in. [`None`] when
+    /// the compositor has no `zxdg_output_manager_v1`, or for a monitor that is not Wayland's.
+    ///
+    /// Unlike `MonitorHandle::position`, this is not multiplied by the output's integer
+    /// `wl_output.scale`, so it is exact under fractional scaling.
+    fn logical_position(&self) -> Option<LogicalPosition<i32>>;
+
+    /// The output's size in the compositor's logical space: `xdg_output`'s `logical_size`, its
+    /// current mode after the output's transform (a rotated output's is rotated) divided by the
+    /// scale the compositor renders it at, fractional scales included. [`None`] as for
+    /// [`logical_position`](Self::logical_position).
+    fn logical_size(&self) -> Option<LogicalSize<i32>>;
+}
+
+impl MonitorHandleExtWayland for dyn MonitorHandleProvider + '_ {
+    fn logical_position(&self) -> Option<LogicalPosition<i32>> {
+        let monitor = self.cast_ref::<MonitorHandle>()?;
+        monitor.logical_position()
+    }
+
+    fn logical_size(&self) -> Option<LogicalSize<i32>> {
+        let monitor = self.cast_ref::<MonitorHandle>()?;
+        monitor.logical_size()
     }
 }
 

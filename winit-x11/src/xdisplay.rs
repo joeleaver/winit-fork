@@ -30,6 +30,8 @@ pub struct XConnection {
 
     _xfixes: x11_dl::xfixes::Xlib,
 
+    _xrandr: x11_dl::xrandr::Xrandr,
+
     pub display: *mut ffi::Display,
 
     /// The manager for the XCB connection.
@@ -94,6 +96,7 @@ impl XConnection {
         let xlib_xcb = ffi::Xlib_xcb::open()?;
         let xinput2 = ffi::XInput2::open()?;
         let xfixes = x11_dl::xfixes::Xlib::open()?;
+        let xrandr = x11_dl::xrandr::Xrandr::open()?;
 
         unsafe { (xlib.XInitThreads)() };
         unsafe { (xlib.XSetErrorHandler)(error_handler) };
@@ -110,6 +113,12 @@ impl XConnection {
         // Register XFixes event converters
         let (mut event_base, mut error_base) = (0, 0);
         unsafe { (xfixes.XFixesQueryExtension)(display, &mut event_base, &mut error_base) };
+
+        // Register the RandR event converters. Events are read through Xlib, which drops an
+        // extension's event that no library registered a converter for, so without this the
+        // `RRScreenChangeNotify` selected on the root (`select_xrandr_input`) never reached the
+        // event processor: neither scale changes nor `monitors_changed` were seen.
+        unsafe { (xrandr.XRRQueryExtension)(display, &mut event_base, &mut error_base) };
 
         // Open the x11rb XCB connection.
         let xcb = {
@@ -179,6 +188,7 @@ impl XConnection {
             xlib,
             xinput2,
             _xfixes: xfixes,
+            _xrandr: xrandr,
             display,
             xcb: Some(xcb),
             atoms: Box::new(atoms),

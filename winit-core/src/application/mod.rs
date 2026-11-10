@@ -211,6 +211,25 @@ pub trait ApplicationHandler {
         let _ = (event_loop, device_id, event);
     }
 
+    /// Emitted when the set of monitors changed, or a monitor's properties did: a monitor was
+    /// connected or disconnected, or its position, size, video mode or scale factor changed.
+    ///
+    /// The event carries no detail: call [`ActiveEventLoop::available_monitors`] to read the new
+    /// list, which is already up to date when this is called. Monitors listed when the event loop
+    /// started are not announced; one change can be reported more than once, and several changes
+    /// can be reported together.
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **Wayland:** emitted when a `wl_output` is advertised or withdrawn, and when an output's
+    ///   information changes (its `wl_output.done`, which also follows an `xdg_output` change).
+    /// - **X11:** emitted on every RandR `RRScreenChangeNotify`, and on every change of the root's
+    ///   `RESOURCE_MANAGER` or the XSETTINGS (`Xft.dpi`, the monitors' scale factor).
+    /// - **Android / iOS / macOS / Orbital / Web / Windows:** Unsupported.
+    fn monitors_changed(&mut self, event_loop: &dyn ActiveEventLoop) {
+        let _ = event_loop;
+    }
+
     /// Emitted when the event loop is about to block and wait for new events.
     ///
     /// Most applications shouldn't need to hook into this event since there is no real relationship
@@ -388,6 +407,11 @@ impl<A: ?Sized + ApplicationHandler> ApplicationHandler for &mut A {
     }
 
     #[inline]
+    fn monitors_changed(&mut self, event_loop: &dyn ActiveEventLoop) {
+        (**self).monitors_changed(event_loop);
+    }
+
+    #[inline]
     fn about_to_wait(&mut self, event_loop: &dyn ActiveEventLoop) {
         (**self).about_to_wait(event_loop);
     }
@@ -453,6 +477,11 @@ impl<A: ?Sized + ApplicationHandler> ApplicationHandler for Box<A> {
         event: DeviceEvent,
     ) {
         (**self).device_event(event_loop, device_id, event);
+    }
+
+    #[inline]
+    fn monitors_changed(&mut self, event_loop: &dyn ActiveEventLoop) {
+        (**self).monitors_changed(event_loop);
     }
 
     #[inline]
