@@ -52,7 +52,7 @@ pub use self::event_loop::{ActiveEventLoop, EventLoop};
 pub use self::popup::Popup;
 pub use self::window::Window;
 pub use self::window::layer_shell::{
-    LayerShellAnchor, LayerShellAttributes, LayerShellCompositorSize,
+    LayerShellAnchor, LayerShellAttributes, LayerShellChanges, LayerShellCompositorSize,
     LayerShellKeyboardInteractivity, LayerShellLayer, LayerShellMargins, WaylandSurfaceRole,
 };
 
@@ -129,6 +129,14 @@ pub trait WindowExtWayland {
     /// ([`Self::set_layer_shell_anchor`]) can also start or end an axis's assignment; either
     /// way the size request is sent again with the change.
     fn set_layer_shell_compositor_size(&self, axes: LayerShellCompositorSize);
+
+    /// Change several of a layer surface's properties in **one** commit
+    /// ([`LayerShellChanges`]; `None` keeps a property). Ignored by an xdg-toplevel. Each
+    /// single-property setter above is a commit of its own, so changing anchors, margins and
+    /// the exclusive zone through them shows the compositor each state in between; this
+    /// shows it only the result. A change of margins is confirmed by `WindowEvent::Moved`, as
+    /// for [`Self::set_layer_shell_margins`].
+    fn set_layer_shell_changes(&self, changes: LayerShellChanges);
 }
 
 impl WindowExtWayland for dyn CoreWindow + '_ {
@@ -177,6 +185,12 @@ impl WindowExtWayland for dyn CoreWindow + '_ {
     fn set_layer_shell_compositor_size(&self, axes: LayerShellCompositorSize) {
         if let Some(window) = self.cast_ref::<Window>() {
             window.update_layer_shell(|layer| layer.set_compositor_size(axes));
+        }
+    }
+
+    fn set_layer_shell_changes(&self, changes: LayerShellChanges) {
+        if let Some(window) = self.cast_ref::<Window>() {
+            window.update_layer_shell(|layer| layer.set_changes(changes));
         }
     }
 }

@@ -97,6 +97,21 @@ pub struct LayerShellCompositorSize {
     pub height: bool,
 }
 
+/// Several changes to a layer surface, applied together in one commit
+/// ([`crate::WindowExtWayland::set_layer_shell_changes`]): the layer-shell state is
+/// double-buffered, so the compositor sees the surface go from its old configuration to the
+/// new one with no state in between (a bar moved to another edge with a new margin and
+/// zone is arranged once, not once per property). `None` leaves a property as it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct LayerShellChanges {
+    pub layer: Option<LayerShellLayer>,
+    pub keyboard_interactivity: Option<LayerShellKeyboardInteractivity>,
+    pub anchor: Option<LayerShellAnchor>,
+    pub margins: Option<LayerShellMargins>,
+    pub exclusive_zone: Option<i32>,
+    pub compositor_size: Option<LayerShellCompositorSize>,
+}
+
 /// What a layer surface is created with ([`crate::WindowAttributesWayland::with_layer_shell`]).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LayerShellAttributes {
@@ -141,6 +156,36 @@ impl LayerShellAttributes {
 
     pub(crate) fn set_compositor_size(&mut self, axes: LayerShellCompositorSize) {
         self.compositor_size = axes;
+    }
+
+    /// Take every change `changes` names.
+    pub(crate) fn set_changes(&mut self, changes: LayerShellChanges) {
+        let LayerShellChanges {
+            layer,
+            keyboard_interactivity,
+            anchor,
+            margins,
+            exclusive_zone,
+            compositor_size,
+        } = changes;
+        if let Some(layer) = layer {
+            self.layer = layer;
+        }
+        if let Some(value) = keyboard_interactivity {
+            self.keyboard_interactivity = value;
+        }
+        if let Some(anchor) = anchor {
+            self.anchor = anchor;
+        }
+        if let Some(margins) = margins {
+            self.margins = margins;
+        }
+        if let Some(zone) = exclusive_zone {
+            self.exclusive_zone = zone;
+        }
+        if let Some(axes) = compositor_size {
+            self.compositor_size = axes;
+        }
     }
 
     /// The axes the compositor assigns now: asked for, and anchored to both edges.
@@ -271,6 +316,26 @@ mod tests {
         assert_eq!(a.requested_size(LogicalSize::new(800, 32)), (0, 32));
         let all = bar(true, true, ALL);
         assert_eq!(all.requested_size(LogicalSize::new(800, 600)), (0, 0));
+    }
+
+    /// Changes taken together set what they name and keep the rest.
+    #[test]
+    fn changes_set_what_they_name() {
+        let mut a = bar(true, false, LEFT_RIGHT_BOTTOM);
+        a.margins = LayerShellMargins { top: 0, right: 0, bottom: 6, left: 0 };
+        a.exclusive_zone = 32;
+        let top = LayerShellAnchor { top: true, bottom: false, left: true, right: true };
+        let margins = LayerShellMargins { top: 6, right: 0, bottom: 0, left: 0 };
+        a.set_changes(LayerShellChanges {
+            anchor: Some(top),
+            margins: Some(margins),
+            ..Default::default()
+        });
+        assert_eq!((a.anchor, a.margins, a.exclusive_zone), (top, margins, 32));
+        assert_eq!(a.assigned_axes(), (true, false), "still left and right");
+        let before = a.clone();
+        a.set_changes(LayerShellChanges::default());
+        assert_eq!(a, before, "no change names nothing");
     }
 
     /// 0 on an axis not anchored to both edges is a protocol error (`invalid_size`): the
