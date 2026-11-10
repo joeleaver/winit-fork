@@ -147,6 +147,10 @@ pub struct WinitState {
 
     /// Whether the user initiated a wake up.
     pub proxy_wake_up: bool,
+
+    /// Whether an output was added, removed or changed since the application was last told
+    /// (`ApplicationHandler::monitors_changed`).
+    pub monitors_changed: bool,
 }
 
 impl WinitState {
@@ -249,6 +253,7 @@ impl WinitState {
             // Make it true by default.
             dispatched_events: true,
             proxy_wake_up: false,
+            monitors_changed: false,
         })
     }
 
@@ -463,6 +468,16 @@ impl PopupHandler for WinitState {
     }
 }
 
+impl WinitState {
+    /// Tell the application, on the event loop's next iteration, that the outputs changed. It is
+    /// told after the whole dispatch, so `available_monitors` (sctk's list, which drops a removed
+    /// output only after `output_destroyed` returns) is up to date when it reads it.
+    fn note_monitors_changed(&mut self) {
+        self.monitors_changed = true;
+        self.dispatched_events = true;
+    }
+}
+
 impl OutputHandler for WinitState {
     fn output_state(&mut self) -> &mut OutputState {
         &mut self.output_state
@@ -470,6 +485,7 @@ impl OutputHandler for WinitState {
 
     fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, output: WlOutput) {
         self.monitors.lock().unwrap().push(MonitorHandle::new(output));
+        self.note_monitors_changed();
     }
 
     fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, updated: WlOutput) {
@@ -480,6 +496,8 @@ impl OutputHandler for WinitState {
         } else {
             monitors.push(updated)
         }
+        drop(monitors);
+        self.note_monitors_changed();
     }
 
     fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, removed: WlOutput) {
@@ -488,6 +506,8 @@ impl OutputHandler for WinitState {
         if let Some(pos) = monitors.iter().position(|output| output == &removed) {
             monitors.remove(pos);
         }
+        drop(monitors);
+        self.note_monitors_changed();
     }
 }
 

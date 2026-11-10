@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::num::NonZeroU32;
 
-use dpi::{LogicalPosition, PhysicalPosition};
+use dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
 use sctk::output::{Mode, OutputData};
 use sctk::reexports::client::Proxy;
 use sctk::reexports::client::protocol::wl_output::WlOutput;
@@ -16,6 +16,18 @@ impl MonitorHandle {
     #[inline]
     pub(crate) fn new(proxy: WlOutput) -> Self {
         Self { proxy }
+    }
+
+    /// `xdg_output`'s logical position (`MonitorHandleExtWayland::logical_position`).
+    pub(crate) fn logical_position(&self) -> Option<LogicalPosition<i32>> {
+        let output_data = self.proxy.data::<OutputData>()?;
+        output_data.with_output_info(|info| info.logical_position.map(LogicalPosition::from))
+    }
+
+    /// `xdg_output`'s logical size (`MonitorHandleExtWayland::logical_size`).
+    pub(crate) fn logical_size(&self) -> Option<LogicalSize<i32>> {
+        let output_data = self.proxy.data::<OutputData>()?;
+        output_data.with_output_info(|info| info.logical_size.map(LogicalSize::from))
     }
 }
 

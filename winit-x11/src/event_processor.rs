@@ -2030,13 +2030,16 @@ impl EventProcessor {
     fn process_dpi_change(&self, app: &mut dyn ApplicationHandler) {
         self.target.xconn.reload_database().expect("failed to reload Xft database");
 
-        // In the future, it would be quite easy to emit monitor hotplug events.
-        let prev_list = {
-            let prev_list = self.target.xconn.invalidate_cached_monitor_list();
-            match prev_list {
-                Some(prev_list) => prev_list,
-                None => return,
-            }
+        let prev_list = self.target.xconn.invalidate_cached_monitor_list();
+
+        // The monitor list is re-read on its next use, so the application reads the new one.
+        // Told first, as on Wayland, before the windows' scale changes below.
+        app.monitors_changed(&self.target);
+
+        // No list was cached: nothing read the monitors' scales, so no window has one to
+        // compare against.
+        let Some(prev_list) = prev_list else {
+            return;
         };
 
         let new_list = self.target.xconn.available_monitors().expect("Failed to get monitor list");
