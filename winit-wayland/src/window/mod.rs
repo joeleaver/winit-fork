@@ -110,11 +110,12 @@ impl Window {
                     output.as_ref(),
                 );
                 layer_attributes.apply(&layer, None);
-                // A size must be set before the first commit: a surface not anchored to two
-                // opposite edges may not ask for 0. The scale is not known yet; the first
-                // configure resizes it at the real one.
-                let initial = size.to_logical::<u32>(1.);
-                layer.set_size(initial.width.max(1), initial.height.max(1));
+                // A size must be set before the first commit: 0 on an axis the compositor
+                // assigns (anchored to both its edges), at least 1 on the others, where 0 is a
+                // protocol error. The scale is not known yet; the first configure resizes it
+                // at the real one.
+                let (width, height) = layer_attributes.requested_size(size.to_logical(1.));
+                layer.set_size(width, height);
                 (
                     ShellSurface::Layer(layer.clone()),
                     state::WindowType::Layer {
@@ -308,6 +309,8 @@ impl Window {
         let mut window_state = state.lock().unwrap();
         let margins_were = window_state.window.layer_margins();
         if window_state.window.update_layer(update) {
+            // New anchors or compositor-size axes can change which axes are sent as 0.
+            window_state.send_layer_size();
             window_state.window.wl_surface().commit();
             let margins = window_state.window.layer_margins();
             if let Some(m) = margins.filter(|m| Some(*m) != margins_were) {

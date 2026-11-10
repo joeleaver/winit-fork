@@ -185,8 +185,10 @@ impl WindowState {
     }
 
     /// A `wlr-layer-shell` surface's configure (rinch patch): only a size, `0` on an axis
-    /// meaning "you choose". Unless both are given the requested size is kept, snapped to the
-    /// resize increments; a layer surface has no states and no decorations.
+    /// meaning "you choose". Each axis given takes the compositor's size (an axis the
+    /// compositor assigns gets it here, a bar's width); on an axis given as 0 the requested
+    /// size is kept, snapped to the resize increments. A layer surface has no states and no
+    /// decorations.
     pub fn configure_layer(&mut self, configure: LayerSurfaceConfigure) -> bool {
         // NOTE: when using fractional scaling or wl_compositor@v6 the scaling
         // should be delivered before the first configure, thus apply it to
@@ -196,9 +198,13 @@ impl WindowState {
             self.stateless_size = self.size;
         }
 
+        let own = self.snap_to_resize_increments(self.size);
         let new_size = match configure.new_size {
             (width, height) if width > 0 && height > 0 => (width, height).into(),
-            _ => self.snap_to_resize_increments(self.size),
+            (width, height) => LogicalSize::new(
+                if width > 0 { width } else { own.width },
+                if height > 0 { height } else { own.height },
+            ),
         };
 
         if let WindowType::Layer { last_configure, .. } = &mut self.window {
