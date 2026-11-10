@@ -23,6 +23,7 @@ use tracing::warn;
 
 /// The role a Wayland window's surface was given.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum WaylandSurfaceRole {
     /// An ordinary `xdg_toplevel`.
     XdgToplevel,
@@ -32,6 +33,7 @@ pub enum WaylandSurfaceRole {
 
 /// The layer a layer surface is stacked in, bottom to top.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum LayerShellLayer {
     /// Below everything, a desktop background.
     Background,
@@ -46,6 +48,7 @@ pub enum LayerShellLayer {
 
 /// Whether a layer surface can take keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum LayerShellKeyboardInteractivity {
     /// Never takes keyboard focus.
     #[default]

@@ -6,6 +6,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use dpi::{LogicalSize, PhysicalInsets, PhysicalPosition, PhysicalSize, Position, Size};
+use layer_shell::{LayerShellAttributes, ShellSurface, WaylandSurfaceRole};
 use rwh_06::RawWindowHandle;
 use sctk::reexports::client::Proxy;
 use sctk::reexports::client::protocol::wl_surface::WlSurface;
@@ -26,7 +27,6 @@ use super::ActiveEventLoop;
 use super::types::xdg_activation::XdgActivationTokenData;
 use crate::window::common::WindowCommon;
 use crate::{WindowAttributesWayland, output};
-use layer_shell::{LayerShellAttributes, ShellSurface, WaylandSurfaceRole};
 pub(crate) mod layer_shell;
 pub(crate) mod state;
 pub use state::WindowState;
@@ -116,14 +116,11 @@ impl Window {
                 // at the real one.
                 let (width, height) = layer_attributes.requested_size(size.to_logical(1.));
                 layer.set_size(width, height);
-                (
-                    ShellSurface::Layer(layer.clone()),
-                    state::WindowType::Layer {
-                        layer,
-                        attributes: Box::new(layer_attributes),
-                        last_configure: None,
-                    },
-                )
+                (ShellSurface::Layer(layer.clone()), state::WindowType::Layer {
+                    layer,
+                    attributes: Box::new(layer_attributes),
+                    last_configure: None,
+                })
             },
             (layer_shell, _) => {
                 if layer_shell.is_some() {
@@ -137,10 +134,10 @@ impl Window {
                     default_decorations,
                     &queue_handle,
                 );
-                (
-                    ShellSurface::Xdg(window.clone()),
-                    state::WindowType::Window { window, last_configure: None },
-                )
+                (ShellSurface::Xdg(window.clone()), state::WindowType::Window {
+                    window,
+                    last_configure: None,
+                })
             },
         };
 
