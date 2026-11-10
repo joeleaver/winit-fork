@@ -451,11 +451,32 @@ impl WindowState {
                     popup.reposition(xdg_positioner, 0);
                 }
             },
-            // A layer surface has no states: its size is always the client's.
-            WindowType::Layer { .. } => self.resize(surface_size.to_logical(self.scale_factor())),
+            // A layer surface has no states: its size is the client's, except on an axis the
+            // compositor assigns, which keeps the compositor's.
+            WindowType::Layer { attributes, .. } => {
+                let (width, height) = attributes.assigned_axes();
+                let mut size: LogicalSize<u32> = surface_size.to_logical(self.scale_factor());
+                if width {
+                    size.width = self.size.width;
+                }
+                if height {
+                    size.height = self.size.height;
+                }
+                self.resize(size)
+            },
         }
 
         self.surface_size_physical()
+    }
+
+    /// Send a layer surface's size request again for its current size (nothing for any other
+    /// role): after a change of anchors or compositor-size axes, which changes the axes that
+    /// go out as 0. Applied with the next commit.
+    pub(crate) fn send_layer_size(&self) {
+        if let WindowType::Layer { layer, attributes, .. } = &self.window {
+            let (width, height) = attributes.requested_size(self.size);
+            layer.set_size(width, height);
+        }
     }
 
     /// Resize the window to the new surface size.
@@ -489,7 +510,10 @@ impl WindowState {
 
         // Set the window geometry, or a layer surface's size.
         match &self.window {
-            WindowType::Layer { layer, .. } => layer.set_size(outer_size.width, outer_size.height),
+            WindowType::Layer { layer, attributes, .. } => {
+                let (width, height) = attributes.requested_size(outer_size);
+                layer.set_size(width, height)
+            },
             window => {
                 if let Some(xdg_surface) = window.xdg_surface() {
                     xdg_surface.set_window_geometry(

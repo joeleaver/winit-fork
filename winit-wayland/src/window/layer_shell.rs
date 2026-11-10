@@ -13,6 +13,7 @@
 //! protocol error): `set_layer` needs v2, on-demand keyboard interactivity v4, which falls
 //! back to none below it.
 
+use dpi::LogicalSize;
 use sctk::reexports::client::Proxy;
 use sctk::reexports::client::protocol::wl_surface::WlSurface;
 use sctk::shell::WaylandSurface;
@@ -22,6 +23,7 @@ use tracing::warn;
 
 /// The role a Wayland window's surface was given.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum WaylandSurfaceRole {
     /// An ordinary `xdg_toplevel`.
     XdgToplevel,
@@ -31,6 +33,7 @@ pub enum WaylandSurfaceRole {
 
 /// The layer a layer surface is stacked in, bottom to top.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum LayerShellLayer {
     /// Below everything, a desktop background.
     Background,
@@ -45,6 +48,7 @@ pub enum LayerShellLayer {
 
 /// Whether a layer surface can take keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum LayerShellKeyboardInteractivity {
     /// Never takes keyboard focus.
     #[default]
@@ -78,6 +82,36 @@ pub struct LayerShellMargins {
     pub left: i32,
 }
 
+/// The axes on which a layer surface takes the size the compositor gives it: the protocol's
+/// size 0 (`zwlr_layer_surface_v1.set_size`), "the compositor assigns it".
+///
+/// The protocol allows 0 only on an axis anchored to both of its edges (`left` and `right` for
+/// the width, `top` and `bottom` for the height), so an axis is assigned only while it is
+/// anchored that way; otherwise the requested surface size is sent, as without the flag. A
+/// full-width bar is anchored left, right and to one of top or bottom, with `width` set: the
+/// compositor gives it the output's width less the margins, and gives it again when the
+/// output's mode changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct LayerShellCompositorSize {
+    pub width: bool,
+    pub height: bool,
+}
+
+/// Several changes to a layer surface, applied together in one commit
+/// ([`crate::WindowExtWayland::set_layer_shell_changes`]): the layer-shell state is
+/// double-buffered, so the compositor sees the surface go from its old configuration to the
+/// new one with no state in between (a bar moved to another edge with a new margin and
+/// zone is arranged once, not once per property). `None` leaves a property as it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct LayerShellChanges {
+    pub layer: Option<LayerShellLayer>,
+    pub keyboard_interactivity: Option<LayerShellKeyboardInteractivity>,
+    pub anchor: Option<LayerShellAnchor>,
+    pub margins: Option<LayerShellMargins>,
+    pub exclusive_zone: Option<i32>,
+    pub compositor_size: Option<LayerShellCompositorSize>,
+}
+
 /// What a layer surface is created with ([`crate::WindowAttributesWayland::with_layer_shell`]).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LayerShellAttributes {
@@ -93,6 +127,10 @@ pub struct LayerShellAttributes {
     pub output_name: Option<String>,
     /// What the surface is for (`zwlr_layer_shell_v1.get_layer_surface`'s namespace).
     pub namespace: String,
+    /// The axes the compositor sizes ([`LayerShellCompositorSize`]). On such an axis the
+    /// surface size the window was created with, or later asked for, is only what it has
+    /// until the compositor's first configure.
+    pub compositor_size: LayerShellCompositorSize,
 }
 
 impl LayerShellAttributes {
@@ -116,6 +154,56 @@ impl LayerShellAttributes {
         self.exclusive_zone = zone;
     }
 
+    pub(crate) fn set_compositor_size(&mut self, axes: LayerShellCompositorSize) {
+        self.compositor_size = axes;
+    }
+
+    /// Take every change `changes` names.
+    pub(crate) fn set_changes(&mut self, changes: LayerShellChanges) {
+        let LayerShellChanges {
+            layer,
+            keyboard_interactivity,
+            anchor,
+            margins,
+            exclusive_zone,
+            compositor_size,
+        } = changes;
+        if let Some(layer) = layer {
+            self.layer = layer;
+        }
+        if let Some(value) = keyboard_interactivity {
+            self.keyboard_interactivity = value;
+        }
+        if let Some(anchor) = anchor {
+            self.anchor = anchor;
+        }
+        if let Some(margins) = margins {
+            self.margins = margins;
+        }
+        if let Some(zone) = exclusive_zone {
+            self.exclusive_zone = zone;
+        }
+        if let Some(axes) = compositor_size {
+            self.compositor_size = axes;
+        }
+    }
+
+    /// The axes the compositor assigns now: asked for, and anchored to both edges.
+    pub(crate) fn assigned_axes(&self) -> (bool, bool) {
+        let a = self.anchor;
+        (
+            self.compositor_size.width && a.left && a.right,
+            self.compositor_size.height && a.top && a.bottom,
+        )
+    }
+
+    /// What `set_size` is sent for a surface of `size` (logical): 0 on an assigned axis, at
+    /// least 1 on the others (0 there is a protocol error).
+    pub(crate) fn requested_size(&self, size: LogicalSize<u32>) -> (u32, u32) {
+        let (width, height) = self.assigned_axes();
+        (if width { 0 } else { size.width.max(1) }, if height { 0 } else { size.height.max(1) })
+    }
+
     pub(crate) fn sctk_layer(&self) -> Layer {
         match self.layer {
             LayerShellLayer::Background => Layer::Background,
@@ -126,7 +214,8 @@ impl LayerShellAttributes {
     }
 
     /// Send every double-buffered request (applied with the next commit). The size is the
-    /// window state's own business (`WindowState::resize`). `layer_was`: the layer the
+    /// window state's own business (`WindowState::resize`, `WindowState::send_layer_size`),
+    /// through [`Self::requested_size`]. `layer_was`: the layer the
     /// surface already has (`None` at creation, where `get_layer_surface` set it), so
     /// `set_layer` is sent only for a change.
     pub(crate) fn apply(&self, surface: &LayerSurface, layer_was: Option<LayerShellLayer>) {
@@ -198,5 +287,67 @@ impl WaylandSurface for ShellSurface {
             ShellSurface::Xdg(window) => window.wl_surface(),
             ShellSurface::Layer(surface) => surface.wl_surface(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bar(width: bool, height: bool, anchor: LayerShellAnchor) -> LayerShellAttributes {
+        LayerShellAttributes {
+            anchor,
+            compositor_size: LayerShellCompositorSize { width, height },
+            ..Default::default()
+        }
+    }
+
+    const LEFT_RIGHT_BOTTOM: LayerShellAnchor =
+        LayerShellAnchor { top: false, bottom: true, left: true, right: true };
+    const ALL: LayerShellAnchor =
+        LayerShellAnchor { top: true, bottom: true, left: true, right: true };
+
+    /// The width is the compositor's on a surface anchored left and right; the height stays
+    /// the requested one.
+    #[test]
+    fn an_axis_anchored_to_both_edges_is_sized_by_the_compositor() {
+        let a = bar(true, false, LEFT_RIGHT_BOTTOM);
+        assert_eq!(a.assigned_axes(), (true, false));
+        assert_eq!(a.requested_size(LogicalSize::new(800, 32)), (0, 32));
+        let all = bar(true, true, ALL);
+        assert_eq!(all.requested_size(LogicalSize::new(800, 600)), (0, 0));
+    }
+
+    /// Changes taken together set what they name and keep the rest.
+    #[test]
+    fn changes_set_what_they_name() {
+        let mut a = bar(true, false, LEFT_RIGHT_BOTTOM);
+        a.margins = LayerShellMargins { top: 0, right: 0, bottom: 6, left: 0 };
+        a.exclusive_zone = 32;
+        let top = LayerShellAnchor { top: true, bottom: false, left: true, right: true };
+        let margins = LayerShellMargins { top: 6, right: 0, bottom: 0, left: 0 };
+        a.set_changes(LayerShellChanges {
+            anchor: Some(top),
+            margins: Some(margins),
+            ..Default::default()
+        });
+        assert_eq!((a.anchor, a.margins, a.exclusive_zone), (top, margins, 32));
+        assert_eq!(a.assigned_axes(), (true, false), "still left and right");
+        let before = a.clone();
+        a.set_changes(LayerShellChanges::default());
+        assert_eq!(a, before, "no change names nothing");
+    }
+
+    /// 0 on an axis not anchored to both edges is a protocol error (`invalid_size`): the
+    /// flag is not sent there, and a size never goes out as 0 without it.
+    #[test]
+    fn an_axis_not_anchored_to_both_edges_keeps_the_requested_size() {
+        let a = bar(true, true, LEFT_RIGHT_BOTTOM);
+        assert_eq!(a.assigned_axes(), (true, false), "height: bottom only");
+        assert_eq!(a.requested_size(LogicalSize::new(800, 32)), (0, 32));
+        let top_left = bar(true, true, LayerShellAnchor::TOP_LEFT);
+        assert_eq!(top_left.requested_size(LogicalSize::new(300, 40)), (300, 40));
+        let none = bar(false, false, ALL);
+        assert_eq!(none.requested_size(LogicalSize::new(0, 0)), (1, 1));
     }
 }
