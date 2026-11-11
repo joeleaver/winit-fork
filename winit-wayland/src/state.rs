@@ -311,30 +311,13 @@ impl WinitState {
 
         updates[pos].close_window = true;
     }
-}
 
-impl ShmHandler for WinitState {
-    fn shm_state(&mut self) -> &mut Shm {
-        &mut self.shm
-    }
-}
-
-impl WindowHandler for WinitState {
-    fn request_close(&mut self, _: &Connection, _: &QueueHandle<Self>, window: &Window) {
-        let window_id = super::make_wid(window.wl_surface());
-        Self::queue_close(&mut self.window_compositor_updates, window_id);
-    }
-
-    fn configure(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        window: &Window,
-        configure: WindowConfigure,
-        _serial: u32,
-    ) {
-        let window_id = super::make_wid(window.wl_surface());
-
+    /// Handle an `xdg_toplevel` configure event
+    fn configure_xdg_toplevel(&mut self, window_id: WindowId, configure: WindowConfigure) {
+        let Some(window) = self.windows.get_mut().get_mut(&window_id) else {
+            tracing::debug!("got configure for dead window {window_id:?}, ignoring it");
+            return;
+        };
         let index = if let Some(index) =
             self.window_compositor_updates.iter().position(|update| update.window_id == window_id)
         {
@@ -345,17 +328,13 @@ impl WindowHandler for WinitState {
         };
 
         // Populate the configure to the window.
-        self.window_compositor_updates[index].resized |= self
-            .windows
-            .get_mut()
-            .get_mut(&window_id)
-            .expect("got configure for dead window.")
+        self.window_compositor_updates[index].resized |= window
             .lock()
             .unwrap()
-            .configure_window(configure, &self.shm, &self.subcompositor_state);
+            .configure_xdg_toplevel(configure, &self.shm, &self.subcompositor_state);
 
-        // NOTE: configure demands wl_surface::commit, however winit doesn't commit on behalf of the
-        // users, since it can break a lot of things, thus it'll ask users to redraw instead.
+        // NOTE: configure demands wl_surface::commit, however winit doesn't commit on behalf of
+        // the users, since it can break a lot of things, thus it'll ask users to redraw instead.
         self.window_requests
             .get_mut()
             .get(&window_id)
@@ -368,9 +347,42 @@ impl WindowHandler for WinitState {
     }
 }
 
+impl ShmHandler for WinitState {
+    fn shm_state(&mut self) -> &mut Shm {
+        &mut self.shm
+    }
+}
+
+impl WindowHandler for WinitState {
+    fn request_close(&mut self, _: &Connection, _: &QueueHandle<Self>, window: &Window) {
+        let window_id = super::make_wid(window.wl_surface());
+        if !self.windows.get_mut().contains_key(&window_id) {
+            tracing::debug!("got close request for dead window {window_id:?}, ignoring it");
+            return;
+        }
+        Self::queue_close(&mut self.window_compositor_updates, window_id);
+    }
+
+    fn configure(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        window: &Window,
+        configure: WindowConfigure,
+        _serial: u32,
+    ) {
+        let window_id = super::make_wid(window.wl_surface());
+        self.configure_xdg_toplevel(window_id, configure);
+    }
+}
+
 impl LayerShellHandler for WinitState {
     fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, layer: &LayerSurface) {
         let window_id = super::make_wid(layer.wl_surface());
+        if !self.windows.get_mut().contains_key(&window_id) {
+            tracing::debug!("got layer surface close for dead window {window_id:?}, ignoring it");
+            return;
+        }
         Self::queue_close(&mut self.window_compositor_updates, window_id);
     }
 
@@ -384,6 +396,10 @@ impl LayerShellHandler for WinitState {
     ) {
         // sctk acks the configure; the size is applied like an xdg window's.
         let window_id = super::make_wid(layer.wl_surface());
+        let Some(window) = self.windows.get_mut().get_mut(&window_id) else {
+            tracing::debug!("got configure for dead window {window_id:?}, ignoring it");
+            return;
+        };
 
         let index = if let Some(index) =
             self.window_compositor_updates.iter().position(|update| update.window_id == window_id)
@@ -394,14 +410,8 @@ impl LayerShellHandler for WinitState {
             self.window_compositor_updates.len() - 1
         };
 
-        self.window_compositor_updates[index].resized |= self
-            .windows
-            .get_mut()
-            .get_mut(&window_id)
-            .expect("got configure for dead window.")
-            .lock()
-            .unwrap()
-            .configure_layer(configure);
+        self.window_compositor_updates[index].resized |=
+            window.lock().unwrap().configure_layer(configure);
 
         // NOTE: configure demands wl_surface::commit, however winit doesn't commit on behalf of the
         // users, since it can break a lot of things, thus it'll ask users to redraw instead.
@@ -426,6 +436,10 @@ impl PopupHandler for WinitState {
         configure: PopupConfigure,
     ) {
         let window_id = super::make_wid(popup.wl_surface());
+        let Some(window) = self.windows.get_mut().get_mut(&window_id) else {
+            tracing::debug!("got configure for dead window {window_id:?}, ignoring it");
+            return;
+        };
 
         let index = if let Some(index) =
             self.window_compositor_updates.iter().position(|update| update.window_id == window_id)
@@ -436,14 +450,8 @@ impl PopupHandler for WinitState {
             self.window_compositor_updates.len() - 1
         };
 
-        self.window_compositor_updates[index].resized |= self
-            .windows
-            .get_mut()
-            .get_mut(&window_id)
-            .expect("got configure for dead window.")
-            .lock()
-            .unwrap()
-            .configure_popup(configure);
+        self.window_compositor_updates[index].resized |=
+            window.lock().unwrap().configure_popup(configure);
 
         // NOTE: configure demands wl_surface::commit, however winit doesn't commit on behalf of the
         // users, since it can break a lot of things, thus it'll ask users to redraw instead
@@ -460,9 +468,12 @@ impl PopupHandler for WinitState {
 
     fn done(&mut self, _: &Connection, _: &QueueHandle<Self>, popup: &XdgPopup) {
         let window_id = super::make_wid(popup.wl_surface());
-        let window_requests = self.window_requests.get_mut().iter().find(|r| *r.0 == window_id);
-        if let Some(window_requests) = window_requests {
-            window_requests.1.closed.store(true, Ordering::Relaxed);
+        if !self.windows.get_mut().contains_key(&window_id) {
+            tracing::debug!("got popup_done for dead popup {window_id:?}, ignoring it");
+            return;
+        }
+        if let Some(window_requests) = self.window_requests.get_mut().get(&window_id) {
+            window_requests.closed.store(true, Ordering::Relaxed);
         }
         Self::queue_close(&mut self.window_compositor_updates, window_id);
     }
