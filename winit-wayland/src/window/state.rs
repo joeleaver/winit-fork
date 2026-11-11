@@ -690,8 +690,6 @@ impl WindowState {
         });
     }
 
-    /// Add seat focus for the window.
-    #[inline]
     /// Note user input this window received from `seat`, with its `serial`.
     pub(crate) fn note_input(&mut self, seat: &WlSeat, serial: u32) {
         self.latest_input = Some((seat.clone(), serial));
@@ -702,6 +700,8 @@ impl WindowState {
         self.latest_input.as_ref()
     }
 
+    /// Add seat focus for the window.
+    #[inline]
     pub fn add_seat_focus(&mut self, seat: ObjectId) {
         self.seat_focus.insert(seat);
     }
