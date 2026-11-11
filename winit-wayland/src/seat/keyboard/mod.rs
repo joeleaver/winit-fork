@@ -133,6 +133,11 @@ impl Dispatch<WlKeyboard, KeyboardData, WinitState> for WinitState {
                 if matches!(key_state, WlKeyState::Repeated | WlKeyState::Pressed) =>
             {
                 seat_state.latest_input_serial.set(Some(serial));
+                if let Some(window) = (*data.window_id.lock().unwrap())
+                    .and_then(|window_id| state.windows.get_mut().get(&window_id))
+                {
+                    window.lock().unwrap().note_input(&data.seat, serial);
+                }
                 let key = key + 8;
                 key_input(
                     keyboard_state,
@@ -209,6 +214,11 @@ impl Dispatch<WlKeyboard, KeyboardData, WinitState> for WinitState {
                 serial, key, state: WEnum::Value(WlKeyState::Released), ..
             } => {
                 seat_state.latest_input_serial.set(Some(serial));
+                if let Some(window) = (*data.window_id.lock().unwrap())
+                    .and_then(|window_id| state.windows.get_mut().get(&window_id))
+                {
+                    window.lock().unwrap().note_input(&data.seat, serial);
+                }
                 let key = key + 8;
 
                 key_input(
