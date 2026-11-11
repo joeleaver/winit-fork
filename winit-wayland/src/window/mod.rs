@@ -339,6 +339,14 @@ impl Window {
         let xdg_activation_token =
             xdg_activation.get_activation_token(&self.common.handles.queue_handle, data);
         xdg_activation_token.set_surface(self.surface());
+        // The user action that caused the request: the latest input this window received, which
+        // compositors check before granting focus with the token. Without any, the token is
+        // requested without a serial and the compositor decides (often attention only).
+        if let Some(window_state) = self.common.state.upgrade() {
+            if let Some((seat, serial)) = window_state.lock().unwrap().latest_input() {
+                xdg_activation_token.set_serial(*serial, seat);
+            }
+        }
         xdg_activation_token.commit();
 
         Ok(serial)

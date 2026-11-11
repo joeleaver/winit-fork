@@ -31,6 +31,7 @@ impl TouchHandler for WinitState {
                 let mut window = window.lock().unwrap();
                 // Remember the serial so drag/resize requests can use it while the finger is down.
                 window.touch_down = Some((touch.seat().clone(), serial));
+                window.note_input(touch.seat(), serial);
                 window.scale_factor()
             },
             None => return,

@@ -103,6 +103,11 @@ pub struct WindowState {
     /// Seats that has keyboard focus on that window.
     seat_focus: HashSet<ObjectId>,
 
+    /// The seat and serial of the latest user input this window received (a key press, repeat
+    /// or release, a pointer button press, a touch down), which an xdg-activation token request
+    /// names as the action that caused it.
+    latest_input: Option<(WlSeat, u32)>,
+
     /// The scale factor of the window.
     scale_factor: f64,
 
@@ -228,6 +233,7 @@ impl WindowState {
             frame: None,
             frame_callback_state: FrameCallbackState::None,
             seat_focus: Default::default(),
+            latest_input: None,
             has_pending_move: None,
             text_input_state: None,
             max_surface_size: None,
@@ -686,6 +692,16 @@ impl WindowState {
 
     /// Add seat focus for the window.
     #[inline]
+    /// Note user input this window received from `seat`, with its `serial`.
+    pub(crate) fn note_input(&mut self, seat: &WlSeat, serial: u32) {
+        self.latest_input = Some((seat.clone(), serial));
+    }
+
+    /// The seat and serial of the latest user input this window received, if any.
+    pub(crate) fn latest_input(&self) -> Option<&(WlSeat, u32)> {
+        self.latest_input.as_ref()
+    }
+
     pub fn add_seat_focus(&mut self, seat: ObjectId) {
         self.seat_focus.insert(seat);
     }
