@@ -1,5 +1,6 @@
 //! The state of the window, which is shared with the event-loop.
 
+use std::fmt;
 use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex, Weak};
 
@@ -8,7 +9,6 @@ use foldhash::HashSet;
 use sctk::compositor::{CompositorState, Region, SurfaceData};
 use sctk::globals::GlobalData;
 use sctk::reexports::client::backend::ObjectId;
-use sctk::reexports::client::protocol::wl_seat::WlSeat;
 use sctk::reexports::client::protocol::wl_shm::WlShm;
 use sctk::reexports::client::{Proxy, QueueHandle};
 use sctk::reexports::csd_frame::DecorationsFrame;
@@ -21,11 +21,12 @@ use sctk::shell::WaylandSurface;
 use sctk::shell::xdg::window::WindowConfigure;
 use sctk::shm::slot::SlotPool;
 use tracing::{info, warn};
+use wayland_client::protocol::wl_seat::WlSeat;
 use wayland_protocols::xdg::shell::client::xdg_toplevel;
 use wayland_protocols::xdg::toplevel_icon::v1::client::xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1;
-use winit_core::error::{NotSupportedError, RequestError};
+use winit_core::error::{CreateWindowError, InvalidInput, NotSupportedError, RequestError};
 use winit_core::monitor::{Fullscreen, MonitorHandle as CoreMonitorHandle};
-use winit_core::window::{ResizeDirection, Theme, WindowId};
+use winit_core::window::{ResizeDirection, Theme, WindowAttributes, WindowId};
 
 use crate::event_loop::OwnedDisplayHandle;
 use crate::seat::{
@@ -41,9 +42,11 @@ mod configure;
 mod cursor;
 mod frame;
 mod ime;
+mod popup_input;
 mod window_type;
 use cursor::GrabState;
 pub use frame::FrameCallbackState;
+pub(crate) use popup_input::{NotedPress, Repositions, newest_press, placement_moved};
 pub use window_type::WindowType;
 
 #[cfg(feature = "sctk-adwaita")]
@@ -53,6 +56,48 @@ pub type WinitFrame = sctk::shell::xdg::fallback_frame::FallbackFrame<WinitState
 
 // Minimum window surface size.
 const MIN_WINDOW_SIZE: LogicalSize<u32> = LogicalSize::new(2, 1);
+
+/// The parent of a window or popup.
+pub struct WindowParent {
+    /// The id of the parent.
+    pub id: WindowId,
+
+    /// Keeps the parent alive for as long as the child exists.
+    ///
+    /// A parent must never be destroyed before its children: xdg-shell requires nested popups
+    /// to be destroyed topmost first, and a dialog should not outlive the window it belongs to.
+    /// When the parent is closed, the event loop closes its children as well; their Wayland
+    /// objects, and then the parent's, are destroyed once the application drops the children.
+    pub state: Arc<Mutex<WindowState>>,
+}
+
+impl WindowParent {
+    /// Resolves the parent window set in `attributes`, or [`None`] if no parent is set.
+    ///
+    /// Fails if the parent is not a Wayland window, or not a window of this event loop.
+    pub fn from_attributes(
+        state: &WinitState,
+        attributes: &WindowAttributes,
+    ) -> Result<Option<Self>, CreateWindowError> {
+        let Some(parent_window_handle) = attributes.parent_window() else { return Ok(None) };
+        let rwh_06::RawWindowHandle::Wayland(parent_window_handle) = parent_window_handle else {
+            return Err(InvalidInput::new("The parent must be a Wayland window handle").into());
+        };
+
+        let id = WindowId::from_raw(parent_window_handle.surface.as_ptr() as usize);
+        let Some(parent_state) = state.windows.borrow().get(&id).cloned() else {
+            return Err(InvalidInput::new("Unknown parent window id").into());
+        };
+        Ok(Some(Self { id, state: parent_state }))
+    }
+}
+
+impl fmt::Debug for WindowParent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Don't print the parent's whole state.
+        f.debug_struct("WindowParent").field("id", &self.id).finish_non_exhaustive()
+    }
+}
 
 /// The state of the window which is being updated from the [`WinitState`].
 #[derive(Debug)]
@@ -107,6 +152,10 @@ pub struct WindowState {
     /// or release, a pointer button press, a touch down), which an xdg-activation token request
     /// names as the action that caused it.
     latest_input: Option<(WlSeat, u32)>,
+
+    /// The latest press this window received (a pointer button press, a key press or repeat, a
+    /// touch down; never a release), which a popup's grab names as the action that opened it.
+    latest_press: Option<NotedPress<WlSeat>>,
 
     /// The scale factor of the window.
     scale_factor: f64,
@@ -178,11 +227,14 @@ pub struct WindowState {
     /// The window frame, which is created from the configure request.
     frame: Option<WinitFrame>,
 
-    /// Parent Window if available
-    parent: Option<WindowId>,
-
     /// Children of this window like popups, dialogs or other windows
     children: Vec<WindowId>,
+
+    /// Parent window if available.
+    ///
+    /// NOTE: This must stay the last field, so the parent is released only after this
+    /// window's own Wayland objects (`window`, `frame`) have been destroyed.
+    parent: Option<WindowParent>,
 }
 
 impl WindowState {
@@ -196,7 +248,7 @@ impl WindowState {
         theme: Option<Theme>,
         prefer_csd: bool,
         scale_factor: f64,
-        parent: Option<WindowId>,
+        parent: Option<WindowParent>,
     ) -> Self {
         let handle = active_event_loop.handle.clone();
         let queue_handle = &active_event_loop.queue_handle;
@@ -234,6 +286,7 @@ impl WindowState {
             frame_callback_state: FrameCallbackState::None,
             seat_focus: Default::default(),
             latest_input: None,
+            latest_press: None,
             has_pending_move: None,
             text_input_state: None,
             max_surface_size: None,
@@ -450,12 +503,13 @@ impl WindowState {
                     self.resize(surface_size.to_logical(self.scale_factor()))
                 }
             },
-            WindowType::Popup { popup, xdg_positioner, .. } => {
-                let size = surface_size.to_logical(self.scale_factor());
-                xdg_positioner.set_size(size.width, size.height);
-                if popup.xdg_popup().version() >= 3 {
-                    popup.reposition(xdg_positioner, 0);
-                }
+            WindowType::Popup { .. } => {
+                // Below `xdg_wm_base` v3 there is no reposition: the popup keeps its size.
+                let _ = self.reposition_popup(
+                    None,
+                    Some(surface_size),
+                    winit_core::event_loop::AsyncRequestSerial::get(),
+                );
             },
             // A layer surface has no states: its size is the client's, except on an axis the
             // compositor assigns, which keeps the compositor's.
@@ -690,9 +744,25 @@ impl WindowState {
         });
     }
 
-    /// Note user input this window received from `seat`, with its `serial`.
-    pub(crate) fn note_input(&mut self, seat: &WlSeat, serial: u32) {
+    /// Note user input this window received from `seat`, with its `serial`: a press (a pointer
+    /// button press, a key press or repeat, a touch down) when `press`, else a key release.
+    pub(crate) fn note_input(&mut self, seat: &WlSeat, serial: u32, press: bool) {
         self.latest_input = Some((seat.clone(), serial));
+        if press {
+            self.latest_press = Some(NotedPress::new(seat.clone(), serial));
+        }
+    }
+
+    /// The newest press noted by this window or any of its ancestors: the cause a popup opened
+    /// on this window names for its grab. Under wlroots compositors a menu's keys arrive on the
+    /// surface that had the keyboard (the panel), not on the menu, so a submenu opened by a key
+    /// finds its press on an ancestor.
+    pub(crate) fn newest_press_in_chain(&self) -> Option<NotedPress<WlSeat>> {
+        let ancestors = self
+            .parent
+            .as_ref()
+            .and_then(|parent| parent.state.lock().unwrap().newest_press_in_chain());
+        newest_press([self.latest_press.as_ref(), ancestors.as_ref()]).cloned()
     }
 
     /// The seat and serial of the latest user input this window received, if any.
@@ -846,7 +916,7 @@ impl WindowState {
     }
 
     pub fn parent(&self) -> Option<WindowId> {
-        self.parent
+        self.parent.as_ref().map(|parent| parent.id)
     }
 
     pub fn remove_child(&mut self, child: &WindowId) {

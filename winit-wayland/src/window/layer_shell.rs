@@ -15,10 +15,7 @@
 
 use dpi::LogicalSize;
 use sctk::reexports::client::Proxy;
-use sctk::reexports::client::protocol::wl_surface::WlSurface;
-use sctk::shell::WaylandSurface;
 use sctk::shell::wlr_layer::{Anchor, KeyboardInteractivity, Layer, LayerSurface, SurfaceKind};
-use sctk::shell::xdg::window::Window;
 use tracing::warn;
 
 /// The role a Wayland window's surface was given.
@@ -253,39 +250,6 @@ impl LayerShellAttributes {
             } else {
                 warn!("zwlr_layer_surface_v1 v{version} cannot change its layer (v2)");
             }
-        }
-    }
-}
-
-/// The role object a [`crate::Window`] holds: an xdg window or a layer surface.
-#[derive(Debug, Clone)]
-pub enum ShellSurface {
-    Xdg(Window),
-    Layer(LayerSurface),
-}
-
-impl ShellSurface {
-    /// The xdg window, when this is one.
-    pub fn xdg(&self) -> Option<&Window> {
-        match self {
-            ShellSurface::Xdg(window) => Some(window),
-            ShellSurface::Layer(_) => None,
-        }
-    }
-
-    pub fn role(&self) -> WaylandSurfaceRole {
-        match self {
-            ShellSurface::Xdg(_) => WaylandSurfaceRole::XdgToplevel,
-            ShellSurface::Layer(_) => WaylandSurfaceRole::LayerShell,
-        }
-    }
-}
-
-impl WaylandSurface for ShellSurface {
-    fn wl_surface(&self) -> &WlSurface {
-        match self {
-            ShellSurface::Xdg(window) => window.wl_surface(),
-            ShellSurface::Layer(surface) => surface.wl_surface(),
         }
     }
 }

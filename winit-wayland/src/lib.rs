@@ -22,17 +22,18 @@ use std::ffi::c_void;
 use std::hash::BuildHasher;
 use std::ptr::NonNull;
 
-use dpi::{LogicalPosition, LogicalSize, PhysicalSize};
+use dpi::{LogicalPosition, LogicalSize, PhysicalSize, Size};
 use sctk::reexports::client::Proxy;
 use sctk::reexports::client::backend::ObjectId;
 use sctk::reexports::client::protocol::wl_surface::WlSurface;
 use sctk::shm::slot::{Buffer, CreateBufferError, SlotPool};
 use wayland_client::protocol::wl_shm::Format;
 use winit_core::data_transfer::DataTransferId;
-use winit_core::event_loop::ActiveEventLoop as CoreActiveEventLoop;
+use winit_core::error::{NotSupportedError, RequestError};
+use winit_core::event_loop::{ActiveEventLoop as CoreActiveEventLoop, AsyncRequestSerial};
 use winit_core::monitor::MonitorHandleProvider;
 use winit_core::window::{
-    ActivationToken, PlatformWindowAttributes, Window as CoreWindow, WindowId,
+    ActivationToken, PlatformWindowAttributes, Window as CoreWindow, WindowId, WindowPositioner,
 };
 
 macro_rules! os_error {
@@ -139,6 +140,21 @@ pub trait WindowExtWayland {
     /// shows it only the result. A change of margins is confirmed by `WindowEvent::Moved`, as
     /// for [`Self::set_layer_shell_margins`].
     fn set_layer_shell_changes(&self, changes: LayerShellChanges);
+
+    /// Re-place a [`WindowType::Popup`] with a new `positioner` and/or at a new `size`, in one
+    /// `xdg_popup.reposition` (rinch patch). The serial returned comes back in
+    /// `WindowEvent::PopupRepositioned` once the compositor has applied it, after the
+    /// `WindowEvent::Moved` and `WindowEvent::SurfaceResized` it causes.
+    ///
+    /// Fails with a not-supported error for a window that is not a popup, on X11, and where the
+    /// compositor's `xdg_wm_base` is older than v3.
+    ///
+    /// [`WindowType::Popup`]: winit_core::window::WindowType::Popup
+    fn request_popup_reposition(
+        &self,
+        positioner: Option<WindowPositioner>,
+        size: Option<Size>,
+    ) -> Result<AsyncRequestSerial, RequestError>;
 }
 
 impl WindowExtWayland for dyn CoreWindow + '_ {
@@ -194,6 +210,17 @@ impl WindowExtWayland for dyn CoreWindow + '_ {
         if let Some(window) = self.cast_ref::<Window>() {
             window.update_layer_shell(|layer| layer.set_changes(changes));
         }
+    }
+
+    fn request_popup_reposition(
+        &self,
+        positioner: Option<WindowPositioner>,
+        size: Option<Size>,
+    ) -> Result<AsyncRequestSerial, RequestError> {
+        let Some(popup) = self.cast_ref::<Popup>() else {
+            return Err(NotSupportedError::new("only a Wayland popup is repositioned").into());
+        };
+        popup.request_reposition(positioner, size)
     }
 }
 

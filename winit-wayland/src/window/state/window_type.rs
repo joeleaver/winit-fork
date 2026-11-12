@@ -23,6 +23,9 @@ pub enum WindowType {
         parent_origin: LogicalPosition<i32>,
 
         positioner: WindowPositioner,
+
+        /// The reposition requests the compositor has not answered yet (rinch patch).
+        repositions: super::Repositions,
     },
     /// A `wlr-layer-shell` surface (rinch patch): it has no xdg surface, no decorations and
     /// no states, and its size is set with `set_size` instead of the window geometry.
