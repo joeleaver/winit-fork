@@ -91,14 +91,17 @@ pub(crate) fn finish_window_setup(
     while !window_state.lock().unwrap().is_configured() {
         // The compositor may dismiss the surface before it ever sends a configure. Detect
         // that and bail out instead of looping forever.
-        if let Some(dismissed_error) = dismissed_error
-            && state
+        // Two `if`s rather than a let chain: this branch keeps beta.4's MSRV (1.86), which
+        // has no let chains.
+        if let Some(dismissed_error) = dismissed_error {
+            if state
                 .window_compositor_updates
                 .iter()
                 .any(|u| u.window_id == window_id && u.close_window)
-        {
-            cleanup_on_error(state);
-            return Err(os_error!(DismissedError(dismissed_error)).into());
+            {
+                cleanup_on_error(state);
+                return Err(os_error!(DismissedError(dismissed_error)).into());
+            }
         }
 
         if let Err(e) = event_queue.blocking_dispatch(state).map_err(|err| os_error!(err)) {
