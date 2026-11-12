@@ -61,6 +61,17 @@ pub enum CreateWindowError {
     PopupNotSupported,
     /// Invalid input attribute
     InvalidAttribute(InvalidInput),
+    /// A [`WindowType::Popup`](crate::window::WindowType::Popup) that grabs the input
+    /// ([`WindowAttributes::with_active`](crate::window::WindowAttributes::with_active)) was
+    /// asked for, but neither its parent nor any of the parent's own parents has received a
+    /// press (a pointer button press, a key press, a touch down) to name as the action that
+    /// opened it.
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **Wayland:** `xdg_popup.grab` must name such a press.
+    /// - **Others:** Never returned.
+    NoGrabCause,
     /// Got unspecified OS specific error during the request.
     Os(OsError),
 }
@@ -69,6 +80,12 @@ impl Display for CreateWindowError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::PopupNotSupported => write!(f, "WindowType::Popup is not supported"),
+            Self::NoGrabCause => {
+                write!(
+                    f,
+                    "a grabbing popup's parent chain has received no press to name as its cause"
+                )
+            },
             Self::InvalidAttribute(InvalidInput { reason }) => {
                 write!(f, "Invalid WindowAttributes: {reason}")
             },

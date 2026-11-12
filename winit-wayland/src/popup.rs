@@ -11,6 +11,7 @@ use sctk::shell::xdg::popup::Popup as SctkPopup;
 use wayland_client::Proxy;
 use winit_core::cursor::Cursor;
 use winit_core::error::{CreateWindowError, InvalidInput, NotSupportedError, RequestError};
+use winit_core::event_loop::AsyncRequestSerial;
 use winit_core::monitor::{Fullscreen, MonitorHandle as CoreMonitorHandle};
 use winit_core::window::{
     CursorGrabMode, ImeCapabilities, ImeRequest, ImeRequestError, ResizeDirection, Theme,
@@ -55,6 +56,18 @@ impl Popup {
         let grab_keyboard = attributes.active;
 
         let parent_window_state = parent_state.lock().unwrap();
+
+        // The press that opened a grabbing popup: the newest one its parent chain received
+        // (rinch patch). Chosen before any Wayland object is made, so a refusal leaves nothing.
+        let grab = if grab_keyboard {
+            Some(
+                parent_window_state
+                    .newest_press_in_chain()
+                    .ok_or(CreateWindowError::NoGrabCause)?,
+            )
+        } else {
+            None
+        };
 
         // Use the scale factor and xdg geometry of the parent.
         let scale_factor = parent_window_state.scale_factor();
@@ -143,6 +156,7 @@ impl Popup {
                     gravity,
                     constraint_adjustment,
                 ),
+                repositions: Default::default(),
             },
             attributes.preferred_theme,
             false,
@@ -170,20 +184,8 @@ impl Popup {
         // Request a keyboard grab so the compositor routes key events to
         // this popup rather than the parent window. Must happen before the
         // first commit that maps the surface.
-        if grab_keyboard {
-            // Use the seat with the most recent event
-            let grab = state
-                .seat_state
-                .seats()
-                .filter_map(|seat| {
-                    let serial = state.seats.get(&seat.id())?.latest_serial()?;
-                    Some((seat, serial))
-                })
-                .max_by_key(|(_, serial)| *serial);
-
-            if let Some((seat, serial)) = grab {
-                popup.xdg_popup().grab(&seat, serial);
-            }
+        if let Some(press) = grab {
+            popup.xdg_popup().grab(&press.seat, press.serial);
         }
 
         // Do initial commit
@@ -242,40 +244,12 @@ impl CoreWindow for Popup {
     }
 
     fn set_positioner(&self, new_positioner: WindowPositioner) {
-        let mut state = self.common.state.lock().unwrap();
-        let scale_factor = state.scale_factor();
-
-        if let WindowType::Popup { popup, xdg_positioner, parent_origin, positioner, .. } =
-            &mut state.window
-        {
-            let (position, size) = new_positioner.anchor_rect;
-            let mut size: LogicalSize<i32> = size.to_logical(scale_factor);
-            size.width = size.width.max(1);
-            size.height = size.height.max(1);
-            *positioner = new_positioner;
-            positioner.anchor_rect.1 = size.into(); // Set new clamped size
-
-            xdg_positioner.set_anchor(from_anchor(new_positioner.anchor));
-            xdg_positioner.set_gravity(from_gravity(new_positioner.gravity));
-            xdg_positioner.set_constraint_adjustment(from_constraint_adjustment(
-                new_positioner.constraint_adjustment,
-            ));
-
-            let position: LogicalPosition<i32> = position.to_logical(scale_factor);
-            xdg_positioner.set_anchor_rect(
-                position.x - parent_origin.x,
-                position.y - parent_origin.y,
-                size.width.max(1),
-                size.height.max(1),
-            );
-
-            let offset: LogicalPosition<i32> = new_positioner.offset.to_logical(scale_factor);
-            xdg_positioner.set_offset(offset.x, offset.y);
-
-            if popup.xdg_popup().version() >= 3 {
-                popup.reposition(xdg_positioner, 0);
-            }
-        }
+        // Below `xdg_wm_base` v3 there is no reposition: the popup stays where it is.
+        let _ = self.common.state.lock().unwrap().reposition_popup(
+            Some(new_positioner),
+            None,
+            AsyncRequestSerial::get(),
+        );
     }
 
     fn id(&self) -> WindowId {
@@ -304,35 +278,21 @@ impl CoreWindow for Popup {
     }
 
     fn outer_position(&self) -> Result<PhysicalPosition<i32>, RequestError> {
-        let state = self.common.state.lock().unwrap();
-        if let WindowType::Popup { last_configure: Some(configure), .. } = &state.window {
-            let (x, y) = configure.position;
-            return Ok(LogicalPosition::new(x, y).to_physical(state.scale_factor()));
-        }
-        Err(os_error!(PopupError("the popup has not been configured yet")).into())
+        self.common
+            .state
+            .lock()
+            .unwrap()
+            .popup_position()
+            .ok_or_else(|| os_error!(PopupError("the popup has not been configured yet")).into())
     }
 
     fn set_outer_position(&self, position: Position) {
         let mut state = self.common.state.lock().unwrap();
-        let scale_factor = state.scale_factor();
-        if let WindowType::Popup { popup, xdg_positioner, positioner, parent_origin, .. } =
-            &mut state.window
-        {
-            let size = positioner.anchor_rect.1;
-            positioner.anchor_rect = (position, size);
-
-            let logical_position: LogicalPosition<i32> = position.to_logical(scale_factor);
-            let logical_size: LogicalSize<i32> = size.to_logical(scale_factor);
-            xdg_positioner.set_anchor_rect(
-                logical_position.x - parent_origin.x,
-                logical_position.y - parent_origin.y,
-                logical_size.width,
-                logical_size.height,
-            );
-            if popup.xdg_popup().version() >= 3 {
-                popup.reposition(xdg_positioner, 0);
-            }
-        }
+        let WindowType::Popup { positioner, .. } = &state.window else { return };
+        let mut new_positioner = *positioner;
+        new_positioner.anchor_rect.0 = position;
+        // Below `xdg_wm_base` v3 there is no reposition: the popup stays where it is.
+        let _ = state.reposition_popup(Some(new_positioner), None, AsyncRequestSerial::get());
     }
 
     fn surface_size(&self) -> PhysicalSize<u32> {
@@ -549,6 +509,97 @@ impl CoreWindow for Popup {
     /// Get the raw-window-handle v0.6 window handle.
     fn rwh_06_window_handle(&self) -> &dyn rwh_06::HasWindowHandle {
         &self.common
+    }
+}
+
+impl Popup {
+    /// Re-place the popup with `positioner` and/or at `size` in one `xdg_popup.reposition`
+    /// (rinch patch). The returned serial comes back in [`WindowEvent::PopupRepositioned`] once
+    /// the compositor has applied it, after the configure that places the popup (a
+    /// `WindowEvent::Moved` when its place changed, `WindowEvent::SurfaceResized` when its size
+    /// did).
+    ///
+    /// Fails with [`NotSupportedError`] when the compositor's `xdg_wm_base` is older than v3,
+    /// which has no reposition.
+    ///
+    /// [`WindowEvent::PopupRepositioned`]: winit_core::event::WindowEvent::PopupRepositioned
+    pub fn request_reposition(
+        &self,
+        positioner: Option<WindowPositioner>,
+        size: Option<Size>,
+    ) -> Result<AsyncRequestSerial, RequestError> {
+        let serial = AsyncRequestSerial::get();
+        self.common.state.lock().unwrap().reposition_popup(positioner, size, serial)?;
+        Ok(serial)
+    }
+}
+
+impl WindowState {
+    /// Apply `new_positioner` and `size`, where given, to a popup's positioner and send one
+    /// `xdg_popup.reposition` whose completion reports `serial` (rinch patch).
+    ///
+    /// The popup keeps the new positioner even below `xdg_wm_base` v3, which cannot send it and
+    /// fails with [`NotSupportedError`].
+    pub(crate) fn reposition_popup(
+        &mut self,
+        new_positioner: Option<WindowPositioner>,
+        size: Option<Size>,
+        serial: AsyncRequestSerial,
+    ) -> Result<(), RequestError> {
+        let scale_factor = self.scale_factor();
+        let WindowType::Popup {
+            popup, xdg_positioner, parent_origin, positioner, repositions, ..
+        } = &mut self.window
+        else {
+            return Err(NotSupportedError::new("only a popup is repositioned").into());
+        };
+
+        if let Some(new_positioner) = new_positioner {
+            let (position, size) = new_positioner.anchor_rect;
+            let mut size: LogicalSize<i32> = size.to_logical(scale_factor);
+            size.width = size.width.max(1);
+            size.height = size.height.max(1);
+            *positioner = new_positioner;
+            positioner.anchor_rect.1 = size.into(); // Set new clamped size
+
+            xdg_positioner.set_anchor(from_anchor(new_positioner.anchor));
+            xdg_positioner.set_gravity(from_gravity(new_positioner.gravity));
+            xdg_positioner.set_constraint_adjustment(from_constraint_adjustment(
+                new_positioner.constraint_adjustment,
+            ));
+
+            let position: LogicalPosition<i32> = position.to_logical(scale_factor);
+            xdg_positioner.set_anchor_rect(
+                position.x - parent_origin.x,
+                position.y - parent_origin.y,
+                size.width,
+                size.height,
+            );
+
+            let offset: LogicalPosition<i32> = new_positioner.offset.to_logical(scale_factor);
+            xdg_positioner.set_offset(offset.x, offset.y);
+        }
+
+        if let Some(size) = size {
+            let size: LogicalSize<i32> = size.to_logical(scale_factor);
+            xdg_positioner.set_size(size.width.max(1), size.height.max(1));
+        }
+
+        if popup.xdg_popup().version() < 3 {
+            return Err(NotSupportedError::new("xdg_popup.reposition needs xdg_wm_base v3").into());
+        }
+        popup.reposition(xdg_positioner, repositions.begin(serial));
+        Ok(())
+    }
+
+    /// Where the compositor last placed the popup, relative to its parent; `None` before its
+    /// first configure, and for any other role.
+    pub(crate) fn popup_position(&self) -> Option<PhysicalPosition<i32>> {
+        let WindowType::Popup { last_configure: Some(configure), .. } = &self.window else {
+            return None;
+        };
+        let (x, y) = configure.position;
+        Some(LogicalPosition::new(x, y).to_physical(self.scale_factor()))
     }
 }
 

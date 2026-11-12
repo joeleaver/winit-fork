@@ -42,9 +42,11 @@ mod configure;
 mod cursor;
 mod frame;
 mod ime;
+mod popup_input;
 mod window_type;
 use cursor::GrabState;
 pub use frame::FrameCallbackState;
+pub(crate) use popup_input::{NotedPress, Repositions, newest_press, placement_moved};
 pub use window_type::WindowType;
 
 #[cfg(feature = "sctk-adwaita")]
@@ -150,6 +152,10 @@ pub struct WindowState {
     /// or release, a pointer button press, a touch down), which an xdg-activation token request
     /// names as the action that caused it.
     latest_input: Option<(WlSeat, u32)>,
+
+    /// The latest press this window received (a pointer button press, a key press or repeat, a
+    /// touch down; never a release), which a popup's grab names as the action that opened it.
+    latest_press: Option<NotedPress<WlSeat>>,
 
     /// The scale factor of the window.
     scale_factor: f64,
@@ -280,6 +286,7 @@ impl WindowState {
             frame_callback_state: FrameCallbackState::None,
             seat_focus: Default::default(),
             latest_input: None,
+            latest_press: None,
             has_pending_move: None,
             text_input_state: None,
             max_surface_size: None,
@@ -496,12 +503,13 @@ impl WindowState {
                     self.resize(surface_size.to_logical(self.scale_factor()))
                 }
             },
-            WindowType::Popup { popup, xdg_positioner, .. } => {
-                let size = surface_size.to_logical(self.scale_factor());
-                xdg_positioner.set_size(size.width, size.height);
-                if popup.xdg_popup().version() >= 3 {
-                    popup.reposition(xdg_positioner, 0);
-                }
+            WindowType::Popup { .. } => {
+                // Below `xdg_wm_base` v3 there is no reposition: the popup keeps its size.
+                let _ = self.reposition_popup(
+                    None,
+                    Some(surface_size),
+                    winit_core::event_loop::AsyncRequestSerial::get(),
+                );
             },
             // A layer surface has no states: its size is the client's, except on an axis the
             // compositor assigns, which keeps the compositor's.
@@ -736,9 +744,25 @@ impl WindowState {
         });
     }
 
-    /// Note user input this window received from `seat`, with its `serial`.
-    pub(crate) fn note_input(&mut self, seat: &WlSeat, serial: u32) {
+    /// Note user input this window received from `seat`, with its `serial`: a press (a pointer
+    /// button press, a key press or repeat, a touch down) when `press`, else a key release.
+    pub(crate) fn note_input(&mut self, seat: &WlSeat, serial: u32, press: bool) {
         self.latest_input = Some((seat.clone(), serial));
+        if press {
+            self.latest_press = Some(NotedPress::new(seat.clone(), serial));
+        }
+    }
+
+    /// The newest press noted by this window or any of its ancestors: the cause a popup opened
+    /// on this window names for its grab. Under wlroots compositors a menu's keys arrive on the
+    /// surface that had the keyboard (the panel), not on the menu, so a submenu opened by a key
+    /// finds its press on an ancestor.
+    pub(crate) fn newest_press_in_chain(&self) -> Option<NotedPress<WlSeat>> {
+        let ancestors = self
+            .parent
+            .as_ref()
+            .and_then(|parent| parent.state.lock().unwrap().newest_press_in_chain());
+        newest_press([self.latest_press.as_ref(), ancestors.as_ref()]).cloned()
     }
 
     /// The seat and serial of the latest user input this window received, if any.

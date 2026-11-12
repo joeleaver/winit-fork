@@ -136,7 +136,7 @@ impl Dispatch<WlKeyboard, KeyboardData, WinitState> for WinitState {
                 if let Some(window) = (*data.window_id.lock().unwrap())
                     .and_then(|window_id| state.windows.get_mut().get(&window_id))
                 {
-                    window.lock().unwrap().note_input(&data.seat, serial);
+                    window.lock().unwrap().note_input(&data.seat, serial, true);
                 }
                 let key = key + 8;
                 key_input(
@@ -217,7 +217,7 @@ impl Dispatch<WlKeyboard, KeyboardData, WinitState> for WinitState {
                 if let Some(window) = (*data.window_id.lock().unwrap())
                     .and_then(|window_id| state.windows.get_mut().get(&window_id))
                 {
-                    window.lock().unwrap().note_input(&data.seat, serial);
+                    window.lock().unwrap().note_input(&data.seat, serial, false);
                 }
                 let key = key + 8;
 

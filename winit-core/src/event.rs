@@ -68,8 +68,28 @@ pub enum WindowEvent {
     ///
     /// ## Platform-specific
     ///
-    /// - **iOS / Android / Web / Wayland:** Unsupported.
+    /// - **Wayland:** Only for a layer surface, whose move is confirmed with its new top-left
+    ///   margins (rinch patch), and for a [`WindowType::Popup`], whenever the compositor places it:
+    ///   its first configure, and any later one that puts it elsewhere (a flip or a slide, a
+    ///   reactive re-placement, a reposition). A popup's position is relative to its parent, as
+    ///   [`Window::outer_position`] reports it.
+    /// - **iOS / Android / Web:** Unsupported.
+    ///
+    /// [`WindowType::Popup`]: crate::window::WindowType::Popup
     Moved(PhysicalPosition<i32>),
+
+    /// The compositor has applied a re-placement of this popup that the application asked for
+    /// (rinch patch): the `serial` is the one the request returned. Any `Moved` or
+    /// `SurfaceResized` the re-placement causes comes before it.
+    ///
+    /// A request the compositor skipped for a later one is completed by the later one's answer,
+    /// in the order they were made.
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **Wayland:** The answer to `xdg_popup.reposition`.
+    /// - **Others:** Never emitted.
+    PopupRepositioned { serial: AsyncRequestSerial },
 
     /// The window has been requested to close.
     CloseRequested,

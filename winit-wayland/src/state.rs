@@ -25,6 +25,7 @@ use sctk::shm::slot::SlotPool;
 use sctk::shm::{Shm, ShmHandler};
 use sctk::subcompositor::SubcompositorState;
 use winit_core::error::OsError;
+use winit_core::event::WindowEvent;
 
 use crate::WindowId;
 use crate::data_transfer::DataTransferState;
@@ -450,8 +451,17 @@ impl PopupHandler for WinitState {
             self.window_compositor_updates.len() - 1
         };
 
-        self.window_compositor_updates[index].resized |=
-            window.lock().unwrap().configure_popup(configure);
+        let configured = window.lock().unwrap().configure_popup(configure);
+        self.window_compositor_updates[index].resized |= configured.resized;
+        // Where the compositor put it, then which of the app's reposition requests that answers
+        // (rinch patch). Both reach the app after the resize, in this order.
+        if let Some(position) = configured.moved {
+            self.events_sink.push_window_event(WindowEvent::Moved(position), window_id);
+        }
+        for serial in configured.repositioned {
+            self.events_sink
+                .push_window_event(WindowEvent::PopupRepositioned { serial }, window_id);
+        }
 
         // NOTE: configure demands wl_surface::commit, however winit doesn't commit on behalf of the
         // users, since it can break a lot of things, thus it'll ask users to redraw instead

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use dpi::LogicalSize;
+use dpi::{LogicalSize, PhysicalPosition};
 use sctk::reexports::csd_frame::{DecorationsFrame, WindowState as XdgWindowState};
 use sctk::shell::wlr_layer::LayerSurfaceConfigure;
 use sctk::shell::xdg::popup::{ConfigureKind, PopupConfigure};
@@ -8,13 +8,42 @@ use sctk::shell::xdg::window::{DecorationMode, WindowConfigure};
 use sctk::shm::Shm;
 use sctk::subcompositor::SubcompositorState;
 use tracing::warn;
+use winit_core::event_loop::AsyncRequestSerial;
 
 #[cfg(feature = "sctk-adwaita")]
 use super::create_sctk_adwaita_config;
-use super::{WindowState, WindowType, WinitFrame};
+use super::{WindowState, WindowType, WinitFrame, placement_moved};
+
+/// What a popup's configure changed (rinch patch).
+#[derive(Debug, Default)]
+pub struct PopupConfigured {
+    /// Whether its surface was resized.
+    pub resized: bool,
+    /// Its new place, relative to its parent, when the configure placed it somewhere new (always
+    /// for the first configure).
+    pub moved: Option<PhysicalPosition<i32>>,
+    /// The application's reposition requests this configure completed, oldest first.
+    pub repositioned: Vec<AsyncRequestSerial>,
+}
 
 impl WindowState {
-    pub fn configure_popup(&mut self, configure: PopupConfigure) -> bool {
+    pub fn configure_popup(&mut self, configure: PopupConfigure) -> PopupConfigured {
+        let mut moved = false;
+        let mut repositioned = Vec::new();
+        if let WindowType::Popup { last_configure, repositions, .. } = &mut self.window {
+            let previous = last_configure.as_ref().map(|configure| configure.position);
+            moved = placement_moved(previous, configure.position);
+            if let ConfigureKind::Reposition { token } = configure.kind {
+                repositioned = repositions.complete(token);
+            }
+        }
+        let resized = self.configure_popup_size(configure);
+        // Read once the configure is stored, at the scale it was applied with.
+        let moved = if moved { self.popup_position() } else { None };
+        PopupConfigured { resized, moved, repositioned }
+    }
+
+    fn configure_popup_size(&mut self, configure: PopupConfigure) -> bool {
         // NOTE: when using fractional scaling or wl_compositor@v6 the scaling
         // should be delivered before the first configure, thus apply it to
         // properly scale the physical sizes provided by the users.
