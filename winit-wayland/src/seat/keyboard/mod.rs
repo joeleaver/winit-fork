@@ -175,7 +175,12 @@ impl Dispatch<WlKeyboard, KeyboardData, WinitState> for WinitState {
                         // Required to handle the wakeups from the repeat sources.
                         state.dispatched_events = true;
 
-                        let data = wl_keyboard.data::<KeyboardData>().unwrap();
+                        // A released keyboard has no data (rinch#2656): a press queued for a
+                        // keyboard the seat already dropped, dispatched after the seat gained
+                        // a new one, arms this timer on a dead proxy.
+                        let Some(data) = wl_keyboard.data::<KeyboardData>() else {
+                            return TimeoutAction::Drop;
+                        };
                         let seat_state = match state.seats.get_mut(&data.seat.id()) {
                             Some(seat_state) => seat_state,
                             None => return TimeoutAction::Drop,

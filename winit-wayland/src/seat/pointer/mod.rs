@@ -4,7 +4,7 @@ use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tracing::warn;
+use tracing::{debug, warn};
 
 use sctk::reexports::client::delegate_dispatch;
 use sctk::reexports::client::protocol::wl_pointer::{AxisSource, WlPointer};
@@ -41,7 +41,15 @@ impl PointerHandler for WinitState {
         pointer: &WlPointer,
         events: &[PointerEvent],
     ) {
-        let seat = pointer.winit_data().seat();
+        // A pointer released by `remove_capability` (the seat lost its pointer) still has the
+        // events that were read in the same batch dispatched to it, and a dead proxy has no
+        // user data. Those events are for a pointer that no longer exists: drop them
+        // (rinch#2656; this `expect`ed the data and killed the app).
+        let Some(winit_data) = pointer.winit_data() else {
+            debug!("Dropping {} queued event(s) for a released wl_pointer", events.len());
+            return;
+        };
+        let seat = winit_data.seat();
         let seat_state = match self.seats.get(&seat.id()) {
             Some(seat_state) => seat_state,
             None => {
@@ -134,13 +142,13 @@ impl PointerHandler for WinitState {
                     window.pointer_entered(Arc::downgrade(themed_pointer));
 
                     // Set the currently focused surface.
-                    pointer.winit_data().data().inner.lock().unwrap().surface = Some(window_id);
+                    winit_data.data().inner.lock().unwrap().surface = Some(window_id);
                 },
                 PointerEventKind::Leave { .. } => {
                     window.pointer_left(Arc::downgrade(themed_pointer));
 
                     // Remove the active surface.
-                    pointer.winit_data().data().inner.lock().unwrap().surface = None;
+                    winit_data.data().inner.lock().unwrap().surface = None;
 
                     self.events_sink.push_window_event(
                         WindowEvent::PointerLeft {
@@ -167,7 +175,7 @@ impl PointerHandler for WinitState {
                 | ref kind @ PointerEventKind::Release { button, serial, .. } => {
                     // Update the last button serial.
 
-                    pointer.winit_data().data().inner.lock().unwrap().latest_button_serial = serial;
+                    winit_data.data().inner.lock().unwrap().latest_button_serial = serial;
                     if matches!(kind, PointerEventKind::Press { .. }) {
                         // For Gnome (Mutter) and possible others only the Press event serial must
                         // be logged!
@@ -195,7 +203,7 @@ impl PointerHandler for WinitState {
                 },
                 PointerEventKind::Axis { horizontal, vertical, source, .. } => {
                     // Get the current phase.
-                    let mut pointer_data = pointer.winit_data().data().inner.lock().unwrap();
+                    let mut pointer_data = winit_data.data().inner.lock().unwrap();
 
                     let has_value120_scroll = horizontal.value120 != 0 || vertical.value120 != 0;
                     let has_discrete_scroll = horizontal.discrete != 0 || vertical.discrete != 0;
@@ -405,12 +413,17 @@ fn wayland_button_to_winit(button: u32) -> ButtonSource {
 }
 
 pub trait WinitPointerDataExt {
-    fn winit_data(&self) -> &PointerData<WinitPointerData>;
+    /// The pointer's data, or `None` once the pointer has been released.
+    ///
+    /// wayland-client answers no user data for a dead proxy, and the events already queued
+    /// for a `wl_pointer` are still dispatched after `remove_capability` releases it
+    /// (rinch#2656), so every caller decides what a released pointer means.
+    fn winit_data(&self) -> Option<&PointerData<WinitPointerData>>;
 }
 
 impl WinitPointerDataExt for WlPointer {
-    fn winit_data(&self) -> &PointerData<WinitPointerData> {
-        self.data::<PointerData<WinitPointerData>>().expect("failed to get pointer data.")
+    fn winit_data(&self) -> Option<&PointerData<WinitPointerData>> {
+        self.data::<PointerData<WinitPointerData>>()
     }
 }
 

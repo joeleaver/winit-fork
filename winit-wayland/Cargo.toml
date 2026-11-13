@@ -49,3 +49,8 @@ winit-common = { workspace = true, features = ["xkb", "wayland"] }
 
 [package.metadata.docs.rs]
 features = ["dlopen", "serde", "csd-adwaita"]
+
+[dev-dependencies]
+# The stand-in compositor of `seat::released_tests` (rinch#2656).
+wayland-protocols = { version = "0.32.12", features = ["server"] }
+wayland-server = "0.31"

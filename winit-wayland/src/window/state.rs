@@ -332,8 +332,10 @@ impl WindowState {
         mut callback: F,
     ) {
         self.pointers.iter().filter_map(Weak::upgrade).for_each(|pointer| {
-            let data = pointer.pointer().winit_data();
-            callback(pointer.as_ref(), data);
+            // A released pointer has no data (rinch#2656); there is nothing to apply to it.
+            if let Some(data) = pointer.pointer().winit_data() {
+                callback(pointer.as_ref(), data);
+            }
         })
     }
 

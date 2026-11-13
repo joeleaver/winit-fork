@@ -2,7 +2,7 @@ use std::sync::{Arc, Weak};
 
 use sctk::compositor::SurfaceData;
 use sctk::reexports::client::Proxy;
-use sctk::seat::pointer::{PointerData, ThemedPointer};
+use sctk::seat::pointer::ThemedPointer;
 use sctk::shell::WaylandSurface;
 use tracing::warn;
 use winit_core::cursor::{Cursor, CursorIcon, CustomCursor as CoreCustomCursor};
@@ -128,11 +128,7 @@ impl WindowState {
             }
             surface.commit();
 
-            let serial = pointer
-                .pointer()
-                .data::<PointerData<WinitPointerData>>()
-                .and_then(|data| data.latest_enter_serial())
-                .unwrap();
+            let Some(serial) = data.latest_enter_serial() else { return };
 
             let hotspot =
                 dpi::PhysicalPosition::new(cursor.hotspot_x, cursor.hotspot_y).to_logical(scale);
@@ -259,7 +255,7 @@ impl WindowState {
         } else {
             for pointer in self.pointers.iter().filter_map(|pointer| pointer.upgrade()) {
                 if let Some(latest_enter_serial) =
-                    pointer.pointer().winit_data().latest_enter_serial()
+                    pointer.pointer().winit_data().and_then(|data| data.latest_enter_serial())
                 {
                     pointer.pointer().set_cursor(latest_enter_serial, None, 0, 0);
                 }

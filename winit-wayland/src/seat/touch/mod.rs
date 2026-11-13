@@ -25,19 +25,23 @@ impl TouchHandler for WinitState {
         id: i32,
         position: (f64, f64),
     ) {
+        // A released `wl_touch` (the seat lost its touch capability) still gets the events
+        // that were already queued for it; they are for nothing now.
+        let Some(seat) = touch.seat() else { return };
+
         let window_id = crate::make_wid(&surface);
         let scale_factor = match self.windows.get_mut().get(&window_id) {
             Some(window) => {
                 let mut window = window.lock().unwrap();
                 // Remember the serial so drag/resize requests can use it while the finger is down.
-                window.touch_down = Some((touch.seat().clone(), serial));
-                window.note_input(touch.seat(), serial, true);
+                window.touch_down = Some((seat.clone(), serial));
+                window.note_input(seat, serial, true);
                 window.scale_factor()
             },
             None => return,
         };
 
-        let seat_state = match self.seats.get_mut(&touch.seat().id()) {
+        let seat_state = match self.seats.get_mut(&seat.id()) {
             Some(seat_state) => seat_state,
             None => {
                 warn!("Received wl_touch::down without seat");
@@ -88,7 +92,10 @@ impl TouchHandler for WinitState {
         _: u32,
         id: i32,
     ) {
-        let seat_state = match self.seats.get_mut(&touch.seat().id()) {
+        // A released `wl_touch` (the seat lost its touch capability) still gets the events
+        // that were already queued for it; they are for nothing now.
+        let Some(seat) = touch.seat() else { return };
+        let seat_state = match self.seats.get_mut(&seat.id()) {
             Some(seat_state) => seat_state,
             None => {
                 warn!("Received wl_touch::up without seat");
@@ -158,7 +165,10 @@ impl TouchHandler for WinitState {
         id: i32,
         position: (f64, f64),
     ) {
-        let seat_state = match self.seats.get_mut(&touch.seat().id()) {
+        // A released `wl_touch` (the seat lost its touch capability) still gets the events
+        // that were already queued for it; they are for nothing now.
+        let Some(seat) = touch.seat() else { return };
+        let seat_state = match self.seats.get_mut(&seat.id()) {
             Some(seat_state) => seat_state,
             None => {
                 warn!("Received wl_touch::motion without seat");
@@ -197,7 +207,10 @@ impl TouchHandler for WinitState {
     }
 
     fn cancel(&mut self, _: &Connection, _: &QueueHandle<Self>, touch: &WlTouch) {
-        let seat_state = match self.seats.get_mut(&touch.seat().id()) {
+        // A released `wl_touch` (the seat lost its touch capability) still gets the events
+        // that were already queued for it; they are for nothing now.
+        let Some(seat) = touch.seat() else { return };
+        let seat_state = match self.seats.get_mut(&seat.id()) {
             Some(seat_state) => seat_state,
             None => {
                 warn!("Received wl_touch::cancel without seat");
@@ -261,11 +274,15 @@ pub struct TouchPoint {
 }
 
 pub trait TouchDataExt {
-    fn seat(&self) -> &WlSeat;
+    /// The seat of this touch, or `None` once the touch has been released.
+    ///
+    /// wayland-client answers no user data for a dead proxy, and a `wl_touch` released by
+    /// `remove_capability` still has its already-queued events dispatched (rinch#2656).
+    fn seat(&self) -> Option<&WlSeat>;
 }
 
 impl TouchDataExt for WlTouch {
-    fn seat(&self) -> &WlSeat {
-        self.data::<TouchData<()>>().expect("failed to get touch data.").seat()
+    fn seat(&self) -> Option<&WlSeat> {
+        self.data::<TouchData<()>>().map(|data| data.seat())
     }
 }

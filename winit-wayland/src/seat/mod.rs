@@ -28,6 +28,9 @@ mod pointer;
 mod text_input;
 mod touch;
 
+#[cfg(test)]
+mod released_tests;
+
 use keyboard::{KeyboardData, KeyboardState};
 pub use pointer::pointer_gesture::{PointerGestureData, PointerGesturesState};
 pub use pointer::relative_pointer::RelativePointerState;
@@ -267,15 +270,15 @@ impl SeatHandler for WinitState {
                 seat_state.primary_selection_device = None;
 
                 if let Some(pointer) = seat_state.pointer.take() {
-                    let pointer_data = pointer.pointer().winit_data();
-
                     // Remove the cursor from the mapping.
                     let surface_id = pointer.surface().id();
                     let _ = self.pointer_surfaces.remove(&surface_id);
 
                     // Remove the inner locks/confines before dropping the pointer.
-                    pointer_data.data().unlock_pointer();
-                    pointer_data.data().unconfine_pointer();
+                    if let Some(pointer_data) = pointer.pointer().winit_data() {
+                        pointer_data.data().unlock_pointer();
+                        pointer_data.data().unconfine_pointer();
+                    }
 
                     if pointer.pointer().version() >= 3 {
                         pointer.pointer().release();
