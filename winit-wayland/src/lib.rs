@@ -63,6 +63,17 @@ pub use self::window::layer_shell::{
 pub trait ActiveEventLoopExtWayland {
     /// True if the [`ActiveEventLoop`] uses Wayland.
     fn is_wayland(&self) -> bool;
+
+    /// The globals the compositor's registry advertises now, in no particular order:
+    /// every protocol interface it offers, each with its version and its global name.
+    /// Empty when the event loop is not Wayland.
+    ///
+    /// It is the registry's list as winit keeps it, so a global the compositor adds or
+    /// withdraws later (a `wl_output` plugged in) is in, or gone from, the next answer.
+    /// What it says is what the compositor offers, not what winit bound: a
+    /// `zwlr_layer_shell_v1` here is what lets
+    /// [`WindowAttributesWayland::with_layer_shell`] make a layer surface.
+    fn wayland_globals(&self) -> Vec<WaylandGlobal>;
 }
 
 impl ActiveEventLoopExtWayland for dyn CoreActiveEventLoop + '_ {
@@ -70,6 +81,38 @@ impl ActiveEventLoopExtWayland for dyn CoreActiveEventLoop + '_ {
     fn is_wayland(&self) -> bool {
         self.cast_ref::<ActiveEventLoop>().is_some()
     }
+
+    fn wayland_globals(&self) -> Vec<WaylandGlobal> {
+        let Some(event_loop) = self.cast_ref::<ActiveEventLoop>() else {
+            return Vec::new();
+        };
+        let state = event_loop.state.borrow();
+        state
+            .registry_state
+            .globals()
+            .map(|global| WaylandGlobal {
+                name: global.name,
+                interface: global.interface.clone(),
+                version: global.version,
+            })
+            .collect()
+    }
+}
+
+/// One global the compositor's registry advertises
+/// ([`ActiveEventLoopExtWayland::wayland_globals`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct WaylandGlobal {
+    /// The global's name: the registry's number for it, unique among the globals the
+    /// compositor advertises while it is advertised. A `wl_output`'s is what
+    /// [`LayerShellAttributes::output_id`] takes, and what
+    /// `MonitorHandle::native_id` answers for it.
+    pub name: u32,
+    /// The protocol interface, such as `zwlr_layer_shell_v1` or `wl_output`.
+    pub interface: String,
+    /// The highest version of the interface the compositor offers.
+    pub version: u32,
 }
 
 /// Additional methods on [`EventLoop`] that are specific to Wayland.
