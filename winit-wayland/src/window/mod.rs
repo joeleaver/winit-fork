@@ -176,17 +176,30 @@ impl Window {
             (Some(layer_attributes), Some(layer_shell)) => {
                 let size: Size =
                     attributes.surface_size.unwrap_or(LogicalSize::new(800., 600.).into());
-                let output = layer_attributes.output_name.as_deref().and_then(|name| {
-                    state.output_state.outputs().find(|output| {
-                        state.output_state.info(output).and_then(|info| info.name).as_deref()
-                            == Some(name)
-                    })
-                });
-                if layer_attributes.output_name.is_some() && output.is_none() {
-                    warn!(
-                        "no wl_output named {:?}; the compositor picks the layer surface's output",
-                        layer_attributes.output_name
-                    );
+                let output = match layer_attributes.output_id {
+                    Some(id) => state.output_state.outputs().find(|output| {
+                        state.output_state.info(output).is_some_and(|info| info.id == id)
+                    }),
+                    None => layer_attributes.output_name.as_deref().and_then(|name| {
+                        state.output_state.outputs().find(|output| {
+                            state.output_state.info(output).and_then(|info| info.name).as_deref()
+                                == Some(name)
+                        })
+                    }),
+                };
+                if output.is_none() {
+                    if let Some(id) = layer_attributes.output_id {
+                        warn!(
+                            "no wl_output with global name {id}; the compositor picks the \
+                             layer surface's output"
+                        );
+                    } else if layer_attributes.output_name.is_some() {
+                        warn!(
+                            "no wl_output named {:?}; the compositor picks the layer surface's \
+                             output",
+                            layer_attributes.output_name
+                        );
+                    }
                 }
                 let layer = layer_shell.create_layer_surface(
                     &queue_handle,

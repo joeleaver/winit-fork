@@ -122,6 +122,11 @@ pub struct LayerShellAttributes {
     /// The output (by `wl_output` name, e.g. `DP-1`) to show on; `None` lets the
     /// compositor choose. An unknown name is the compositor's choice too.
     pub output_name: Option<String>,
+    /// The output by its `wl_output` global's name (the registry's number for it,
+    /// `MonitorHandle::native_id`), which every output has, named or not (a
+    /// `wl_output` before version 4 has no name). It wins over
+    /// [`output_name`](Self::output_name); an unknown one is the compositor's choice.
+    pub output_id: Option<u32>,
     /// What the surface is for (`zwlr_layer_shell_v1.get_layer_surface`'s namespace).
     pub namespace: String,
     /// The axes the compositor sizes ([`LayerShellCompositorSize`]). On such an axis the
