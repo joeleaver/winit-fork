@@ -126,7 +126,8 @@ impl Popup {
         // A layer surface has no xdg surface: its popup is made without a parent and given
         // one with `zwlr_layer_surface_v1.get_popup` before the first commit (rinch patch).
         let parent_surface = parent_window_state.window.xdg_surface();
-        let surface = state.compositor_state.create_surface(&queue_handle);
+        // Made at the parent's scale, which the popup starts at (rinch#2652).
+        let surface = crate::window::create_surface_at(&state, &queue_handle, scale_factor);
         let popup = SctkPopup::from_surface(
             parent_surface,
             &xdg_positioner,
@@ -163,6 +164,13 @@ impl Popup {
             scale_factor,
             Some(parent),
         );
+
+        // The parent's scale, the buffer scale included (rinch#2652): left at 1, a popup on a
+        // scaled output without fractional scaling was drawn at twice its size, and the
+        // compositor's scale, the same as the window's, is no change.
+        if scale_factor != 1.0 {
+            popup_state.set_initial_scale_factor(scale_factor);
+        }
 
         // Set transparency hint.
         popup_state.set_transparent(attributes.transparent);

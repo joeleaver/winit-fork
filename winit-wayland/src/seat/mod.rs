@@ -29,7 +29,7 @@ mod text_input;
 mod touch;
 
 #[cfg(test)]
-mod released_tests;
+pub(crate) mod released_tests;
 
 use keyboard::{KeyboardData, KeyboardState};
 pub use pointer::pointer_gesture::{PointerGestureData, PointerGesturesState};

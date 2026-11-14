@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use dpi::{LogicalSize, PhysicalInsets, PhysicalPosition, PhysicalSize, Position, Size};
 use layer_shell::{LayerShellAttributes, WaylandSurfaceRole};
+use sctk::reexports::client::QueueHandle;
 use sctk::reexports::client::protocol::wl_surface::WlSurface;
 use sctk::shell::WaylandSurface;
 use sctk::shell::xdg::window::WindowDecorations;
@@ -116,6 +117,31 @@ pub(crate) fn finish_window_setup(
     Ok((window_id, window_requests))
 }
 
+/// The scale a new surface starts at, before the compositor sends one (rinch#2652): the app's
+/// guess (`WindowAttributesWayland::with_initial_scale_factor`) when it is finite and positive,
+/// else the parent's scale, else 1.
+pub(crate) fn starting_scale(initial: Option<f64>, parent: Option<f64>) -> f64 {
+    initial.filter(|scale| scale.is_finite() && *scale > 0.0).or(parent).unwrap_or(1.0)
+}
+
+/// The whole buffer scale a surface starting at `scale` is given where there is no fractional
+/// scaling: `scale` rounded up, as a compositor rounds its own.
+pub(crate) fn whole_scale(scale: f64) -> i32 {
+    scale.ceil().clamp(1.0, i32::MAX as f64) as i32
+}
+
+/// A new `wl_surface` that starts at `scale`. sctk keeps each surface's whole scale and reports
+/// only a change from it (`wl_surface.preferred_buffer_scale`, or the outputs it entered), so it
+/// must start at the whole scale the window starts at: started at 1, a window that starts at 2
+/// on an output at 1 would never hear of the 1 where there is no fractional scaling.
+pub(crate) fn create_surface_at(
+    state: &WinitState,
+    queue_handle: &QueueHandle<WinitState>,
+    scale: f64,
+) -> WlSurface {
+    state.compositor_state.create_surface_with_data(queue_handle, None, whole_scale(scale), ())
+}
+
 /// Constructing a window/popup failed: the compositor dismissed the surface before it
 /// ever sent an initial configure.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -168,7 +194,10 @@ impl Window {
 
         let monitors = state.monitors.clone();
 
-        let surface = state.compositor_state.create_surface(&queue_handle);
+        // The scale the window starts at (rinch#2652): the app's guess, else the parent's.
+        let scale_factor =
+            starting_scale(platform.initial_scale_factor, parent.as_ref().map(|p| p.2));
+        let surface = create_surface_at(&state, &queue_handle, scale_factor);
         let compositor = state.compositor_state.clone();
         let display = event_loop_window_target.handle.connection.display();
 
@@ -246,6 +275,7 @@ impl Window {
             window_type,
             &surface,
             parent,
+            scale_factor,
         )?;
 
         let event_loop_awakener = event_loop_window_target.event_loop_awakener.clone();
@@ -304,6 +334,9 @@ impl Window {
     ///
     /// `parent` is the result of [`Self::parent_from_attributes`] for the same `attributes`; a
     /// layer surface has none. `platform` is the attributes' Wayland part, taken out of them.
+    /// `scale_factor` is the scale the window starts at ([`starting_scale`]), the one `surface`
+    /// was made at ([`create_surface_at`]).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn setup(
         event_loop_window_target: &ActiveEventLoop,
         state: &mut WinitState,
@@ -312,28 +345,16 @@ impl Window {
         window_type: WindowType,
         surface: &WlSurface,
         parent: Option<ToplevelParent>,
+        scale_factor: f64,
     ) -> Result<SetupResults, CreateWindowError> {
-        let (parent, parent_xdg_toplevel, scale_factor) = match parent {
-            Some((parent, xdg_toplevel, scale_factor)) => {
-                (Some(parent), Some(xdg_toplevel), scale_factor)
-            },
-            None => (None, None, 1.0),
+        let (parent, parent_xdg_toplevel) = match parent {
+            Some((parent, xdg_toplevel, _)) => (Some(parent), Some(xdg_toplevel)),
+            None => (None, None),
         };
         let parent_state = parent.as_ref().map(|parent| parent.state.clone());
 
         let size: Size = attributes.surface_size.unwrap_or(LogicalSize::new(800., 600.).into());
-        let WindowAttributesWayland {
-            name: app_name,
-            activation_token,
-            prefer_csd,
-            initial_scale_factor,
-            ..
-        } = platform;
-        // The app's guess at the compositor's scale (rinch#2652) wins over the parent's: the
-        // first buffer is drawn at it.
-        let initial_scale_factor =
-            initial_scale_factor.filter(|scale| scale.is_finite() && *scale > 0.0);
-        let scale_factor = initial_scale_factor.unwrap_or(scale_factor);
+        let WindowAttributesWayland { name: app_name, activation_token, prefer_csd, .. } = platform;
 
         let mut window_state = WindowState::new(
             event_loop_window_target,
@@ -346,9 +367,9 @@ impl Window {
             parent,
         );
 
-        // Draw the first buffer at the guessed scale: set the buffer scale for it too (a no-op
+        // Draw the first buffer at the starting scale: set the buffer scale for it too (a no-op
         // with fractional scaling, where the viewport maps the buffer to the logical size).
-        if initial_scale_factor.is_some() {
+        if scale_factor != 1.0 {
             window_state.set_initial_scale_factor(scale_factor);
         }
 
@@ -767,5 +788,57 @@ impl CoreWindow for Window {
     /// Get the raw-window-handle v0.6 window handle.
     fn rwh_06_window_handle(&self) -> &dyn rwh_06::HasWindowHandle {
         &self.common
+    }
+}
+
+#[cfg(test)]
+mod starting_scale_tests {
+    //! The scale a new surface starts at (rinch#2652), against the stand-in compositor of
+    //! `seat::released_tests`.
+
+    use sctk::compositor::SurfaceData;
+    use sctk::reexports::client::Proxy;
+    use wayland_server::protocol::wl_seat::Capability;
+
+    use super::{create_surface_at, starting_scale, whole_scale};
+
+    #[test]
+    fn the_guess_wins_over_the_parent_then_one() {
+        assert_eq!(starting_scale(Some(2.0), Some(1.5)), 2.0);
+        assert_eq!(starting_scale(None, Some(1.5)), 1.5);
+        assert_eq!(starting_scale(None, None), 1.0);
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(starting_scale(Some(bad), Some(3.0)), 3.0, "{bad}");
+        }
+        assert_eq!(whole_scale(1.0), 1);
+        assert_eq!(whole_scale(1.25), 2);
+        assert_eq!(whole_scale(2.0), 2);
+    }
+
+    /// sctk reports a surface's whole scale only when it changes from the one the surface was
+    /// made with. A window that starts at 2 must have its surface made at 2, so the compositor's
+    /// 1 (an output at 1, no fractional scaling) is a change that reaches winit.
+    #[test]
+    fn a_surface_is_made_at_the_whole_scale_it_starts_at_and_hears_a_lower_one() {
+        let (stand_in, mut queue, mut state) =
+            crate::seat::released_tests::connect(Capability::empty());
+        let qh = queue.handle();
+        for (scale, whole) in [(2.0, 2), (1.5, 2), (1.0, 1)] {
+            let surface = create_surface_at(&state, &qh, scale);
+            let data = surface.data::<SurfaceData<()>>().unwrap();
+            assert_eq!(data.scale_factor(), whole, "made at {scale}");
+        }
+
+        let surface = create_surface_at(&state, &qh, 2.0);
+        queue.roundtrip(&mut state).unwrap();
+        stand_in.send(|server| {
+            server
+                .surface
+                .as_ref()
+                .expect("the surface reached the compositor")
+                .preferred_buffer_scale(1);
+        });
+        queue.roundtrip(&mut state).unwrap();
+        assert_eq!(surface.data::<SurfaceData<()>>().unwrap().scale_factor(), 1);
     }
 }

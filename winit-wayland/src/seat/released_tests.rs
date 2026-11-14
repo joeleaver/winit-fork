@@ -37,10 +37,10 @@ use wayland_server::{Client, DataInit, Dispatch, Display, DisplayHandle, GlobalD
 use crate::state::WinitState;
 
 /// The stand-in compositor's state: the resources a test sends events through.
-struct Server {
+pub(crate) struct Server {
     capabilities: Capability,
     seat: Option<WlSeat>,
-    surface: Option<WlSurface>,
+    pub(crate) surface: Option<WlSurface>,
     pointer: Option<WlPointer>,
     touch: Option<WlTouch>,
 }
@@ -51,7 +51,7 @@ type Job = Box<dyn FnOnce(&mut Server) + Send>;
 type Message = Option<(Job, Sender<()>)>;
 
 /// A compositor on its own thread, so the client side can make blocking roundtrips.
-struct StandIn {
+pub(crate) struct StandIn {
     jobs: Sender<Message>,
     thread: Option<JoinHandle<()>>,
 }
@@ -89,7 +89,7 @@ impl StandIn {
     }
 
     /// Run `job` on the compositor and wait until what it sent has been written.
-    fn send(&self, job: impl FnOnce(&mut Server) + Send + 'static) {
+    pub(crate) fn send(&self, job: impl FnOnce(&mut Server) + Send + 'static) {
         let (done, wait) = mpsc::channel();
         self.jobs.send(Some((Box::new(job), done))).unwrap();
         wait.recv().unwrap();
@@ -114,7 +114,7 @@ impl ClientData for NoClientData {
 }
 
 /// A `WinitState` connected to a fresh stand-in compositor whose seat has `capabilities`.
-fn connect(capabilities: Capability) -> (StandIn, EventQueue<WinitState>, WinitState) {
+pub(crate) fn connect(capabilities: Capability) -> (StandIn, EventQueue<WinitState>, WinitState) {
     let (client_socket, server_socket) = UnixStream::pair().unwrap();
     let stand_in = StandIn::start(capabilities, server_socket);
 
