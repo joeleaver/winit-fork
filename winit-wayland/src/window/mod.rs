@@ -322,7 +322,18 @@ impl Window {
         let parent_state = parent.as_ref().map(|parent| parent.state.clone());
 
         let size: Size = attributes.surface_size.unwrap_or(LogicalSize::new(800., 600.).into());
-        let WindowAttributesWayland { name: app_name, activation_token, prefer_csd, .. } = platform;
+        let WindowAttributesWayland {
+            name: app_name,
+            activation_token,
+            prefer_csd,
+            initial_scale_factor,
+            ..
+        } = platform;
+        // The app's guess at the compositor's scale (rinch#2652) wins over the parent's: the
+        // first buffer is drawn at it.
+        let initial_scale_factor =
+            initial_scale_factor.filter(|scale| scale.is_finite() && *scale > 0.0);
+        let scale_factor = initial_scale_factor.unwrap_or(scale_factor);
 
         let mut window_state = WindowState::new(
             event_loop_window_target,
@@ -334,6 +345,12 @@ impl Window {
             scale_factor,
             parent,
         );
+
+        // Draw the first buffer at the guessed scale: set the buffer scale for it too (a no-op
+        // with fractional scaling, where the viewport maps the buffer to the logical size).
+        if initial_scale_factor.is_some() {
+            window_state.set_initial_scale_factor(scale_factor);
+        }
 
         window_state.set_window_icon(attributes.window_icon);
 

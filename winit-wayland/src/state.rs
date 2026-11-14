@@ -273,6 +273,13 @@ impl WinitState {
                 return;
             }
 
+            // The scale the window already has, the one it started with included (rinch#2652:
+            // `with_initial_scale_factor`), is no change: no `ScaleFactorChanged`, no resize,
+            // no redraw.
+            if window.lock().unwrap().scale_factor() == scale_factor {
+                return;
+            }
+
             // The scale factor change is for the window.
             let pos = if let Some(pos) = self
                 .window_compositor_updates

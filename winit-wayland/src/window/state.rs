@@ -784,6 +784,15 @@ impl WindowState {
         self.seat_focus.remove(seat);
     }
 
+    /// Set the scale factor a window starts with, before the compositor sends one
+    /// (rinch#2652): `scale_factor` where the compositor has fractional scaling, else rounded up
+    /// to the whole buffer scale the compositor would send for it.
+    pub fn set_initial_scale_factor(&mut self, scale_factor: f64) {
+        let scale_factor =
+            if self.fractional_scale.is_some() { scale_factor } else { scale_factor.ceil() };
+        self.set_scale_factor(scale_factor);
+    }
+
     /// Set the scale factor for the given window.
     #[inline]
     pub fn set_scale_factor(&mut self, scale_factor: f64) {

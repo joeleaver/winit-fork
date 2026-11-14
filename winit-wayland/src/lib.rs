@@ -311,6 +311,7 @@ pub struct WindowAttributesWayland {
     pub(crate) activation_token: Option<ActivationToken>,
     pub(crate) prefer_csd: bool,
     pub(crate) layer_shell: Option<LayerShellAttributes>,
+    pub(crate) initial_scale_factor: Option<f64>,
 }
 
 impl WindowAttributesWayland {
@@ -363,6 +364,31 @@ impl WindowAttributesWayland {
     #[inline]
     pub fn with_layer_shell(mut self, layer_shell: LayerShellAttributes) -> Self {
         self.layer_shell = Some(layer_shell);
+        self
+    }
+
+    /// The scale factor the window starts with, until the compositor sends one (rinch patch).
+    ///
+    /// A compositor tells a surface its scale (`wp_fractional_scale_v1.preferred_scale`,
+    /// `wl_surface.preferred_buffer_scale`, or the outputs it entered) only once the surface
+    /// is mapped, which takes a first buffer. Without this the window starts at scale `1.0`
+    /// (or its parent's), so on a scaled output its first frame is drawn at scale 1 and the
+    /// next at the output's. Give the scale the window will most likely get, the scale of the
+    /// output it is going to (a layer surface's output), of the only output, or the scale it
+    /// had when last shown, and the first buffer is drawn at it: [`Window::scale_factor`] and
+    /// a [`Size::Physical`] surface size use it from creation on, and the buffer scale is set
+    /// to it (rounded up to a whole number where the compositor has no fractional scaling, as
+    /// the compositor itself would). When the compositor's scale arrives and differs,
+    /// [`WindowEvent::ScaleFactorChanged`] is sent as usual; when it is the same, nothing is.
+    ///
+    /// A value that is not finite and positive is ignored.
+    ///
+    /// [`Window::scale_factor`]: winit_core::window::Window::scale_factor
+    /// [`Size::Physical`]: dpi::Size::Physical
+    /// [`WindowEvent::ScaleFactorChanged`]: winit_core::event::WindowEvent::ScaleFactorChanged
+    #[inline]
+    pub fn with_initial_scale_factor(mut self, scale_factor: f64) -> Self {
+        self.initial_scale_factor = Some(scale_factor);
         self
     }
 }
