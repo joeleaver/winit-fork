@@ -189,11 +189,29 @@ impl XConnection {
         Ok(outer_window)
     }
 
+    /// The frame around `window`, or none when the window cannot be asked. The requests below
+    /// fail when the window is gone (`BadWindow`/`BadDrawable`: another client destroyed it,
+    /// rinch#2489, and the `DestroyNotify` that tells the application is on its way) or the
+    /// connection is; either way its frame no longer matters, and this used to panic.
     pub fn get_frame_extents_heuristic(
         &self,
         window: xproto::Window,
         root: xproto::Window,
     ) -> FrameExtentsHeuristic {
+        self.try_frame_extents_heuristic(window, root).unwrap_or_else(|err| {
+            tracing::debug!("no frame extents for window {window}, which is gone: {err:?}");
+            FrameExtentsHeuristic {
+                frame_extents: FrameExtents::new(0, 0, 0, 0),
+                heuristic_path: FrameExtentsHeuristicPath::UnsupportedBordered,
+            }
+        })
+    }
+
+    fn try_frame_extents_heuristic(
+        &self,
+        window: xproto::Window,
+        root: xproto::Window,
+    ) -> Result<FrameExtentsHeuristic, X11Error> {
         use self::FrameExtentsHeuristicPath::*;
 
         // Position relative to root window.
@@ -201,15 +219,12 @@ impl XConnection {
         // isn't nested are outlined in the comments throughout this function, but in addition to
         // that, fullscreen windows often aren't nested.
         let (inner_y_rel_root, child) = {
-            let coords = self
-                .translate_coords_root(window, root)
-                .expect("Failed to translate window coordinates");
+            let coords = self.translate_coords_root(window, root)?;
             (coords.dst_y, coords.child)
         };
 
         let (width, height, border) = {
-            let inner_geometry =
-                self.get_geometry(window).expect("Failed to get inner window geometry");
+            let inner_geometry = self.get_geometry(window)?;
             (inner_geometry.width, inner_geometry.height, inner_geometry.border_width)
         };
 
@@ -247,16 +262,14 @@ impl XConnection {
             //   fairly unique concept of window position; it interprets positions given to
             //   XMoveWindow as a client area position rather than a position of the overall window.
 
-            FrameExtentsHeuristic { frame_extents, heuristic_path: Supported }
+            Ok(FrameExtentsHeuristic { frame_extents, heuristic_path: Supported })
         } else if nested {
             // If the position value we have is for a nested window used as the client area, we'll
             // just climb up the hierarchy and get the geometry of the outermost window we're
             // nested in.
-            let outer_window =
-                self.climb_hierarchy(window, root).expect("Failed to climb window hierarchy");
+            let outer_window = self.climb_hierarchy(window, root)?;
             let (outer_y, outer_width, outer_height) = {
-                let outer_geometry =
-                    self.get_geometry(outer_window).expect("Failed to get outer window geometry");
+                let outer_geometry = self.get_geometry(outer_window)?;
                 (outer_geometry.y, outer_geometry.width, outer_geometry.height)
             };
 
@@ -272,12 +285,12 @@ impl XConnection {
             let bottom = diff_y.saturating_sub(offset_y);
 
             let frame_extents = FrameExtents::new(left, right, top, bottom);
-            FrameExtentsHeuristic { frame_extents, heuristic_path: UnsupportedNested }
+            Ok(FrameExtentsHeuristic { frame_extents, heuristic_path: UnsupportedNested })
         } else {
             // This is the case for xmonad and dwm, AKA the only WMs tested that supplied a
             // border value. This is convenient, since we can use it to get an accurate frame.
             let frame_extents = FrameExtents::from_border(border.into());
-            FrameExtentsHeuristic { frame_extents, heuristic_path: UnsupportedBordered }
+            Ok(FrameExtentsHeuristic { frame_extents, heuristic_path: UnsupportedBordered })
         }
     }
 }

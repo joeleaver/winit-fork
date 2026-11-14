@@ -1548,12 +1548,21 @@ impl UnownedWindow {
     }
 
     fn inner_position_physical(&self) -> (i32, i32) {
-        // This should be okay to unwrap since the only error XTranslateCoordinates can return
-        // is BadWindow, and if the window handle is bad we have bigger problems.
-        self.xconn
-            .translate_coords_root(self.xwindow, self.root)
-            .map(|coords| (coords.dst_x.into(), coords.dst_y.into()))
-            .unwrap()
+        // The only error XTranslateCoordinates can return is BadWindow: another client destroyed
+        // the window (rinch#2489). The application hears of it from the `DestroyNotify` that
+        // follows, and may ask for the window's position before then (any event it handles
+        // first); it gets a stale one (the last `ConfigureNotify`'s, or the origin), rather
+        // than a panic.
+        match self.xconn.translate_coords_root(self.xwindow, self.root) {
+            Ok(coords) => (coords.dst_x.into(), coords.dst_y.into()),
+            Err(err) => {
+                tracing::debug!(
+                    "window {} is gone, its last position stands: {err:?}",
+                    self.xwindow
+                );
+                self.shared_state_lock().inner_position.unwrap_or_default()
+            },
+        }
     }
 
     #[inline]
@@ -1602,12 +1611,18 @@ impl UnownedWindow {
     }
 
     pub(crate) fn surface_size_physical(&self) -> (u32, u32) {
-        // This should be okay to unwrap since the only error XGetGeometry can return
-        // is BadWindow, and if the window handle is bad we have bigger problems.
-        self.xconn
-            .get_geometry(self.xwindow)
-            .map(|geo| (geo.width.into(), geo.height.into()))
-            .unwrap()
+        // The only error XGetGeometry can return is BadDrawable: another client destroyed the
+        // window (rinch#2489, `xdotool windowclose`). The application hears of it from the
+        // `DestroyNotify` that follows, but the events before it (the focus-out's
+        // `ModifiersChanged`, say) come first, and an application asks for the size while
+        // handling any of them. It gets the last size the window reported, rather than a panic.
+        match self.xconn.get_geometry(self.xwindow) {
+            Ok(geo) => (geo.width.into(), geo.height.into()),
+            Err(err) => {
+                tracing::debug!("window {} is gone, its last size stands: {err:?}", self.xwindow);
+                self.shared_state_lock().size.unwrap_or_default()
+            },
+        }
     }
 
     #[inline]
