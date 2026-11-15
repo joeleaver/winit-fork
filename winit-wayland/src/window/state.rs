@@ -583,8 +583,8 @@ impl WindowState {
     /// resize and starts its marker.
     ///
     /// Answers whether to send the second sync, and, when the request ended, whether the
-    /// size changed (only by a held request going out) and the marker generation of a
-    /// request that went out.
+    /// size changed (a held request going out, or the compositor's answer applied) and the
+    /// marker generation of a request that went out.
     pub fn layer_marker_done(&mut self, generation: u64, stage: u8) -> MarkerDone {
         let applied = self.size;
         let WindowType::Layer { attributes, asks, .. } = &mut self.window else {
@@ -595,7 +595,7 @@ impl WindowState {
             Marker::SyncAgain => MarkerDone::SyncAgain,
             Marker::Ignore => MarkerDone::Nothing,
             Marker::Ended(step) => {
-                let (resized, marker) = self.layer_step(|_, _| step, false);
+                let (resized, marker) = self.layer_step(|_, _, _| step, false);
                 MarkerDone::Ended { resized, marker }
             },
         }
@@ -604,17 +604,19 @@ impl WindowState {
     /// Do what a layer surface's size requests say follows (a configure, or a marker that
     /// ended a request): send a request's `set_size` and commit it, then apply a size (a
     /// held request going out, else the compositor's word, with no `set_size` back).
-    /// `force` applies the size even when unchanged (the first configure).
+    /// `step` is given the surface's size and the axes the compositor assigns. `force`
+    /// applies the size even when unchanged (the first configure).
     /// Answers whether the size changed, and the marker generation of a request sent.
     pub(crate) fn layer_step(
         &mut self,
-        step: impl FnOnce(&mut LayerAsks, (bool, bool)) -> Step,
+        step: impl FnOnce(&mut LayerAsks, LogicalSize<u32>, (bool, bool)) -> Step,
         force: bool,
     ) -> (bool, Option<u64>) {
+        let applied = self.size;
         let WindowType::Layer { attributes, asks, .. } = &mut self.window else {
             return (false, None);
         };
-        let step = step(asks, attributes.assigned_axes());
+        let step = step(asks, applied, attributes.assigned_axes());
         // A request sent is committed first, carrying only its `set_size`; what is
         // applied goes with the next frame.
         if let (Some(sent), WindowType::Layer { attributes, layer, .. }) = (step.send, &self.window)
@@ -623,11 +625,7 @@ impl WindowState {
             layer.set_size(width, height);
             layer.wl_surface().commit();
         }
-        let apply = match step.send {
-            Some(sent) if sent.apply => Some(sent.size),
-            _ => step.apply,
-        };
-        let resized = match apply {
+        let resized = match step.apply {
             Some(size) if force || size != self.surface_size() => {
                 self.apply_configured_size(size);
                 true
