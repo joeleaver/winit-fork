@@ -3,13 +3,12 @@
 //!
 //! The request commits, then sends a `wl_display.sync`; when that is done a second one is
 //! sent, and when the second is done every configure the compositor was going to send for
-//! the request has arrived. Whatever the state machine says follows (the compositor's last
-//! word applied, a held request going out with its own marker) is done here.
+//! the request has arrived. Whatever the state machine says follows (a held request going
+//! out, applied at once, with its own marker) is done here.
 
 use sctk::dispatch2::Dispatch2;
 use sctk::reexports::client::protocol::wl_callback::{Event as CallbackEvent, WlCallback};
 use sctk::reexports::client::{Connection, QueueHandle};
-use sctk::shell::WaylandSurface;
 use winit_core::window::WindowId;
 
 use crate::state::WinitState;
@@ -59,12 +58,11 @@ impl Dispatch2<WlCallback, WinitState> for LayerAskMarker {
             },
             MarkerDone::Ended { resized, marker } => {
                 if resized {
-                    // The compositor's last word became the size: told as a resize.
+                    // A held request went out, applied at once: told as a resize.
                     state.queue_resize(self.window_id);
                 }
                 if let Some(generation) = marker {
-                    // A request went out: commit its `set_size` and start its marker.
-                    window.lock().unwrap().window.wl_surface().commit();
+                    // A request went out (committed): start its marker.
                     LayerAskMarker::start(conn, qh, self.window_id, generation);
                 }
             },

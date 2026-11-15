@@ -76,16 +76,11 @@ impl WindowCommon {
     pub(crate) fn request_surface_size(&self, size: Size) -> Option<PhysicalSize<u32>> {
         let mut s = self.state.lock().unwrap();
         match s.request_surface_size(size) {
-            SizeAnswer::Applied(new_size) => {
+            SizeAnswer::Applied { size: new_size, marker } => {
                 drop(s);
-                self.request_redraw();
-                Some(new_size)
-            },
-            // A layer surface: its configure applies the size (rinch patch). A request that
-            // went out now is committed at once, and its marker started.
-            SizeAnswer::Asked { marker } => {
+                // A layer surface's request that went out (committed): start its marker
+                // (rinch patch).
                 if let Some(generation) = marker {
-                    s.window.wl_surface().commit();
                     self.display.sync(
                         &self.handles.queue_handle,
                         crate::types::layer_ask::LayerAskMarker {
@@ -95,8 +90,11 @@ impl WindowCommon {
                         },
                     );
                 }
-                None
+                self.request_redraw();
+                Some(new_size)
             },
+            // Held until the request in flight ends: its size comes as a resize then.
+            SizeAnswer::Held => None,
         }
     }
 

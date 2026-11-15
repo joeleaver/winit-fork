@@ -55,7 +55,7 @@ fn grow_then_shrink_applies_only_the_answer_to_the_newest_request() {
     assert_eq!(asks.ask(s(60, 36), s(60, 36), FREE), Ask::Hold);
     let step = asks.configured(s(396, 36), FREE);
     assert_eq!(step.apply, None, "the answer to a replaced request");
-    assert!(matches!(step.send, Some((sz, _)) if sz == s(60, 36)));
+    assert!(matches!(step.send, Some(Sent { size: sz, .. }) if sz == s(60, 36)));
     assert_eq!(asks.configured(s(60, 36), FREE), applies(s(60, 36)));
     assert!(!asks.in_flight());
 }
@@ -69,7 +69,7 @@ fn shrink_then_grow_applies_only_the_answer_to_the_newest_request() {
     assert_eq!(asks.ask(s(492, 36), s(396, 36), FREE), Ask::Hold);
     let step = asks.configured(s(108, 36), FREE);
     assert_eq!(step.apply, None);
-    assert!(matches!(step.send, Some((sz, _)) if sz == s(492, 36)));
+    assert!(matches!(step.send, Some(Sent { size: sz, .. }) if sz == s(492, 36)));
     assert_eq!(asks.configured(s(492, 36), FREE), applies(s(492, 36)));
 }
 
@@ -81,7 +81,7 @@ fn only_the_newest_held_request_goes_out() {
     assert_eq!(asks.ask(s(60, 36), s(100, 36), FREE), Ask::Hold);
     assert_eq!(asks.ask(s(80, 36), s(100, 36), FREE), Ask::Hold);
     let step = asks.configured(s(396, 36), FREE);
-    assert!(matches!(step.send, Some((sz, _)) if sz == s(80, 36)));
+    assert!(matches!(step.send, Some(Sent { size: sz, .. }) if sz == s(80, 36)));
 }
 
 /// 396, then 60, then back to 396 before the first answer: the held request is the
@@ -105,7 +105,9 @@ fn a_real_smaller_grant_is_applied_asked_once_more_then_stands() {
     sent(&mut asks, s(300, 300), s(300, 100));
     let step = asks.configured(s(300, 200), FREE);
     assert_eq!(step.apply, Some(s(300, 200)));
-    let Some((sz, generation)) = step.send else { panic!("asked once more: {step:?}") };
+    let Some(Sent { size: sz, generation, .. }) = step.send else {
+        panic!("asked once more: {step:?}")
+    };
     assert_eq!(sz, s(300, 300));
     assert_eq!(asks.marker_done(generation, 1, s(300, 200), FREE), Marker::SyncAgain);
     assert_eq!(asks.marker_done(generation, 2, s(300, 200), FREE), Marker::Ended(Step::default()));
@@ -124,10 +126,12 @@ fn a_clamp_to_exactly_an_older_answer_comes_again_and_is_applied() {
     assert_eq!(asks.ask(s(500, 36), s(300, 36), FREE), Ask::Hold);
     let step = asks.configured(s(400, 36), FREE);
     assert_eq!(step.apply, None);
-    assert!(matches!(step.send, Some((sz, _)) if sz == s(500, 36)), "{step:?}");
+    assert!(matches!(step.send, Some(Sent { size: sz, .. }) if sz == s(500, 36)), "{step:?}");
     let step = asks.configured(s(400, 36), FREE);
     assert_eq!(step.apply, Some(s(400, 36)));
-    let Some((sz, generation)) = step.send else { panic!("asked once more: {step:?}") };
+    let Some(Sent { size: sz, generation, .. }) = step.send else {
+        panic!("asked once more: {step:?}")
+    };
     assert_eq!(sz, s(500, 36));
     assert_eq!(asks.marker_done(generation, 1, s(400, 36), FREE), Marker::SyncAgain);
     assert_eq!(asks.marker_done(generation, 2, s(400, 36), FREE), Marker::Ended(Step::default()));
@@ -143,7 +147,7 @@ fn silence_after_a_replaced_answer_keeps_the_surfaces_size() {
     assert_eq!(asks.ask(s(60, 36), s(60, 36), FREE), Ask::Hold);
     let step = asks.configured(s(396, 36), FREE);
     assert_eq!(step.apply, None);
-    let Some((_, generation)) = step.send else { panic!("60 goes out: {step:?}") };
+    let Some(Sent { generation, .. }) = step.send else { panic!("60 goes out: {step:?}") };
     assert_eq!(asks.marker_done(generation, 1, s(60, 36), FREE), Marker::SyncAgain);
     assert_eq!(asks.marker_done(generation, 2, s(60, 36), FREE), Marker::Ended(Step::default()));
     assert!(!asks.in_flight());
@@ -160,12 +164,13 @@ fn a_silent_compositor_ends_the_request_at_the_marker() {
         panic!("ended");
     };
     assert_eq!(step.apply, None);
-    let Some((_, generation)) = step.send else { panic!("once more") };
+    let Some(Sent { generation, .. }) = step.send else { panic!("once more") };
     assert_eq!(asks.marker_done(generation, 1, s(400, 36), FREE), Marker::SyncAgain);
     assert_eq!(asks.marker_done(generation, 2, s(400, 36), FREE), Marker::Ended(Step::default()));
 }
 
-/// A held request goes out when the marker ends the one in flight.
+/// A held request goes out when the marker ends the one in flight, applied at once: the
+/// size changes outside a configure, which the window reports as a resize.
 #[test]
 fn a_held_request_goes_out_at_the_marker() {
     let mut asks = LayerAsks::default();
@@ -175,7 +180,11 @@ fn a_held_request_goes_out_at_the_marker() {
     let Marker::Ended(step) = asks.marker_done(generation, 2, s(500, 36), FREE) else {
         panic!("ended");
     };
-    assert!(matches!(step.send, Some((sz, _)) if sz == s(700, 36)));
+    assert_eq!(step.apply, None);
+    assert!(
+        matches!(step.send, Some(Sent { size: sz, apply: true, .. }) if sz == s(700, 36)),
+        "{step:?}"
+    );
 }
 
 /// A configure after the marker ended the request: applied, it ends nothing and sends
@@ -185,7 +194,7 @@ fn a_late_configure_after_the_marker_is_applied_and_ends_nothing() {
     let mut asks = LayerAsks::default();
     let generation = sent(&mut asks, s(500, 36), s(400, 36));
     assert_eq!(asks.marker_done(generation, 1, s(400, 36), FREE), Marker::SyncAgain);
-    let Marker::Ended(Step { send: Some((_, generation)), .. }) =
+    let Marker::Ended(Step { send: Some(Sent { generation, .. }), .. }) =
         asks.marker_done(generation, 2, s(400, 36), FREE)
     else {
         panic!("asked once more");
@@ -205,7 +214,7 @@ fn a_crossing_configure_costs_one_more_request() {
     sent(&mut asks, s(300, 36), s(400, 36));
     let step = asks.configured(s(500, 36), FREE);
     assert_eq!(step.apply, Some(s(500, 36)));
-    assert!(matches!(step.send, Some((sz, _)) if sz == s(300, 36)), "{step:?}");
+    assert!(matches!(step.send, Some(Sent { size: sz, .. }) if sz == s(300, 36)), "{step:?}");
     assert_eq!(asks.configured(s(300, 36), FREE), applies(s(300, 36)));
 }
 
@@ -252,4 +261,18 @@ fn the_newest_request_is_the_held_else_the_one_in_flight() {
     assert_eq!(asks.newest_request(), Some(s(500, 36)));
     asks.ask(s(300, 36), s(400, 36), FREE);
     assert_eq!(asks.newest_request(), Some(s(300, 36)));
+}
+
+/// A held request going out is applied at once (the client draws at the size it asked
+/// for); a request sent once more after the compositor gave another size is not (that size
+/// stands until the compositor answers otherwise).
+#[test]
+fn a_held_request_is_applied_as_it_goes_out_and_a_resent_one_is_not() {
+    let mut asks = LayerAsks::default();
+    sent(&mut asks, s(108, 36), s(396, 36));
+    asks.ask(s(492, 36), s(108, 36), FREE);
+    let step = asks.configured(s(108, 36), FREE);
+    assert!(matches!(step.send, Some(Sent { apply: true, .. })), "{step:?}");
+    let step = asks.configured(s(400, 36), FREE);
+    assert!(matches!(step.send, Some(Sent { apply: false, .. })), "{step:?}");
 }

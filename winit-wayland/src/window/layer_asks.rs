@@ -20,16 +20,19 @@
 //! unanswered is held (a newer one replaces it), and goes out when the one in
 //! flight ends. Nothing is matched by size.
 //!
-//! A request does not change the surface's size: a configure does (the
-//! compositor's word, applied without sending `set_size` back). The one
-//! exception is a configure that ends a request while a newer one is held:
-//! that newer request goes out at once, and the configure, the answer to a
-//! request the client has replaced, is not applied. Nothing is lost by that:
-//! a compositor that holds to that size answers the newer request with it
-//! again (wlroots answers every request; KWin compares its size with the
-//! client's buffer, which never took the replaced answer). So the application
-//! is told only the answer to its newest request, or the compositor's own
-//! size, and a compositor's silence means the size the surface has suits it.
+//! A request that goes out is applied at once (the client sizes those axes,
+//! and draws its next frame at the size it asked for), after its `set_size`
+//! is committed, so the commit carries no state for a buffer not drawn yet. A
+//! configure is applied too (the compositor's word), without sending
+//! `set_size` back. The one exception is a configure that ends a request
+//! while a newer one is held: the newer request goes out, applied, and the
+//! configure, the answer to a request the client has replaced, is not
+//! applied. Nothing is lost by that: a compositor that holds to that size
+//! answers the newer request with it again (wlroots answers every request;
+//! KWin compares its size with the client's buffer, which never took the
+//! replaced answer). So the application is told only its newest request, the
+//! answer to it, or the compositor's own size, and a compositor's silence
+//! means the size the surface has suits it.
 //!
 //! The request in flight ends at the next configure, or, when none comes, at
 //! a marker: a `wl_display.sync` sent behind the commit and, when it is done,
@@ -48,8 +51,8 @@ use dpi::LogicalSize;
 use crate::window::layer_shell::WaylandSurfaceRole;
 
 /// Whether a surface of `role` asks the compositor for a new size, one request in flight,
-/// and takes the size its configure gives (a layer surface), rather than resizing at once
-/// as upstream does (a toplevel, and a popup, whose role is reported as a toplevel's).
+/// holding newer ones (a layer surface), rather than resizing at once as upstream does (a
+/// toplevel, and a popup, whose role is reported as a toplevel's).
 pub fn asks_for_its_size(role: WaylandSurfaceRole) -> bool {
     role == WaylandSurfaceRole::LayerShell
 }
@@ -71,8 +74,20 @@ pub enum Ask {
 pub struct Step {
     /// The size to apply now (the compositor's word on the newest request, or its own).
     pub apply: Option<LogicalSize<u32>>,
-    /// A request to send now, with its marker generation.
-    pub send: Option<(LogicalSize<u32>, u64)>,
+    /// A request to send now.
+    pub send: Option<Sent>,
+}
+
+/// A request sent after a configure or a marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sent {
+    pub size: LogicalSize<u32>,
+    /// Its marker's generation.
+    pub generation: u64,
+    /// Applied at once, as a fresh request is (a held one going out); not for a request
+    /// sent once more after the compositor gave another size, whose size stands until it
+    /// answers otherwise.
+    pub apply: bool,
 }
 
 /// What a marker's `done` leads to.
@@ -137,12 +152,12 @@ impl LayerAsks {
             // A newer request waits: it goes out, and this answer to the replaced one is
             // not applied.
             Some(next) if !same_on_client_axes(next, size, assigned) => {
-                Step { apply: None, send: Some(self.start(next, false)) }
+                Step { apply: None, send: Some(self.sent(next, false)) }
             },
             // The newer request is this size already.
             Some(_) => Step { apply: Some(size), send: None },
             None if !done.resent && !same_on_client_axes(done.size, size, assigned) => {
-                Step { apply: Some(size), send: Some(self.start(done.size, true)) }
+                Step { apply: Some(size), send: Some(self.sent(done.size, true)) }
             },
             None => Step { apply: Some(size), send: None },
         }
@@ -168,11 +183,11 @@ impl LayerAsks {
         // The compositor said nothing on this request: the size the surface has suits it.
         let send = match self.held.take() {
             Some(next) if !same_on_client_axes(next, applied, assigned) => {
-                Some(self.start(next, false))
+                Some(self.sent(next, false))
             },
             Some(_) => None,
             None if !done.resent && !same_on_client_axes(done.size, applied, assigned) => {
-                Some(self.start(done.size, true))
+                Some(self.sent(done.size, true))
             },
             None => None,
         };
@@ -189,6 +204,13 @@ impl LayerAsks {
     /// does not replace the request with an older size.
     pub fn newest_request(&self) -> Option<LogicalSize<u32>> {
         self.held.or(self.in_flight.map(|f| f.size))
+    }
+
+    /// A request going out after a configure or a marker: a held one is applied at once, a
+    /// re-sent one is not.
+    fn sent(&mut self, size: LogicalSize<u32>, resent: bool) -> Sent {
+        let (size, generation) = self.start(size, resent);
+        Sent { size, generation, apply: !resent }
     }
 
     fn start(&mut self, size: LogicalSize<u32>, resent: bool) -> (LogicalSize<u32>, u64) {

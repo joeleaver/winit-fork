@@ -73,11 +73,11 @@ pub enum MarkerDone {
 /// What a size request did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SizeAnswer {
-    /// Applied now: the window's size.
-    Applied(PhysicalSize<u32>),
-    /// Asked of the compositor, whose configure applies it (a layer surface). With a
-    /// marker generation when a request went out now: the caller commits and starts it.
-    Asked { marker: Option<u64> },
+    /// Applied now: the window's size. For a layer surface whose request went out now
+    /// (sent and committed), its marker's generation, which the caller starts.
+    Applied { size: PhysicalSize<u32>, marker: Option<u64> },
+    /// Held until the layer surface's request in flight ends (rinch patch).
+    Held,
 }
 
 /// The parent of a window or popup.
@@ -522,8 +522,8 @@ impl WindowState {
 
     /// Try to resize the window when the user can do so. A toplevel or a popup is resized at
     /// once, as upstream; a layer surface asks the compositor, one request in flight at a
-    /// time, and takes the size the compositor answers with
-    /// ([`crate::window::layer_asks`], rinch patch).
+    /// time: a request that goes out is applied at once, and one made while another is in
+    /// flight is held ([`crate::window::layer_asks`], rinch patch).
     pub fn request_surface_size(&mut self, surface_size: Size) -> SizeAnswer {
         let asks_for_it = crate::window::layer_asks::asks_for_its_size(self.window.surface_role());
         if let (true, WindowType::Layer { attributes, asks, layer, .. }) =
@@ -539,12 +539,22 @@ impl WindowState {
             }
             return match asks.ask(size, self.size, assigned) {
                 Ask::Send(size, generation) => {
+                    // Sent and committed first, then applied: the commit carries only
+                    // `set_size`, and the size's other state (the viewport destination)
+                    // goes with the frame drawn at it.
                     let (width, height) = attributes.requested_size(size);
                     layer.set_size(width, height);
-                    SizeAnswer::Asked { marker: Some(generation) }
+                    self.window.wl_surface().commit();
+                    self.apply_configured_size(size);
+                    SizeAnswer::Applied {
+                        size: self.surface_size_physical(),
+                        marker: Some(generation),
+                    }
                 },
-                Ask::Hold => SizeAnswer::Asked { marker: None },
-                Ask::Nothing => SizeAnswer::Applied(self.surface_size_physical()),
+                Ask::Hold => SizeAnswer::Held,
+                Ask::Nothing => {
+                    SizeAnswer::Applied { size: self.surface_size_physical(), marker: None }
+                },
             };
         }
         match &self.window {
@@ -564,15 +574,17 @@ impl WindowState {
             WindowType::Layer { .. } => unreachable!("a layer surface's request is answered above"),
         }
 
-        SizeAnswer::Applied(self.surface_size_physical())
+        SizeAnswer::Applied { size: self.surface_size_physical(), marker: None }
     }
 
     /// A layer surface's marker sync is done (`stage` 1 or 2 of request `generation`): what
-    /// follows ([`crate::window::layer_asks`]). A request that goes out because of it has
-    /// had its `set_size` sent; the caller commits and starts its marker.
+    /// follows ([`crate::window::layer_asks`]). A held request that goes out because of it
+    /// has had its `set_size` sent and committed, and is applied; the caller reports the
+    /// resize and starts its marker.
     ///
     /// Answers whether to send the second sync, and, when the request ended, whether the
-    /// size changed and the marker generation of a request that went out.
+    /// size changed (only by a held request going out) and the marker generation of a
+    /// request that went out.
     pub fn layer_marker_done(&mut self, generation: u64, stage: u8) -> MarkerDone {
         let applied = self.size;
         let WindowType::Layer { attributes, asks, .. } = &mut self.window else {
@@ -590,8 +602,9 @@ impl WindowState {
     }
 
     /// Do what a layer surface's size requests say follows (a configure, or a marker that
-    /// ended a request): apply a size (with no `set_size` back), send a request's
-    /// `set_size`. `force` applies the size even when unchanged (the first configure).
+    /// ended a request): send a request's `set_size` and commit it, then apply a size (a
+    /// held request going out, else the compositor's word, with no `set_size` back).
+    /// `force` applies the size even when unchanged (the first configure).
     /// Answers whether the size changed, and the marker generation of a request sent.
     pub(crate) fn layer_step(
         &mut self,
@@ -602,21 +615,26 @@ impl WindowState {
             return (false, None);
         };
         let step = step(asks, attributes.assigned_axes());
-        let resized = match step.apply {
+        // A request sent is committed first, carrying only its `set_size`; what is
+        // applied goes with the next frame.
+        if let (Some(sent), WindowType::Layer { attributes, layer, .. }) = (step.send, &self.window)
+        {
+            let (width, height) = attributes.requested_size(sent.size);
+            layer.set_size(width, height);
+            layer.wl_surface().commit();
+        }
+        let apply = match step.send {
+            Some(sent) if sent.apply => Some(sent.size),
+            _ => step.apply,
+        };
+        let resized = match apply {
             Some(size) if force || size != self.surface_size() => {
                 self.apply_configured_size(size);
                 true
             },
             _ => false,
         };
-        let marker = step.send.map(|(size, generation)| {
-            if let WindowType::Layer { attributes, layer, .. } = &self.window {
-                let (width, height) = attributes.requested_size(size);
-                layer.set_size(width, height);
-            }
-            generation
-        });
-        (resized, marker)
+        (resized, step.send.map(|sent| sent.generation))
     }
 
     /// Send a layer surface's size request again for its current size (nothing for any other

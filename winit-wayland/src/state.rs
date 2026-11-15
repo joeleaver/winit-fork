@@ -312,9 +312,9 @@ impl WinitState {
         }
     }
 
-    /// A layer surface's size changed outside a configure handler (its size request's
-    /// marker applied the compositor's last word, rinch patch): report it as a resize, and
-    /// ask for a redraw at the new size.
+    /// A layer surface's size changed outside a configure handler (a held size request went
+    /// out at its marker, applied at once, rinch patch): report it as a resize, and ask for a
+    /// redraw at the new size.
     pub fn queue_resize(&mut self, window_id: WindowId) {
         let updates = &mut self.window_compositor_updates;
         let pos = match updates.iter().position(|update| update.window_id == window_id) {
@@ -444,9 +444,8 @@ impl LayerShellHandler for WinitState {
 
         let (resized, marker) = window.lock().unwrap().configure_layer(configure);
         self.window_compositor_updates[index].resized |= resized;
-        // A held size request went out: commit it and start its marker.
+        // A size request went out (committed): start its marker.
         if let Some(generation) = marker {
-            layer.wl_surface().commit();
             crate::types::layer_ask::LayerAskMarker::start(conn, qh, window_id, generation);
         }
 
