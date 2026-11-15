@@ -218,7 +218,10 @@ impl WindowState {
     /// compositor assigns gets it here, a bar's width); on an axis given as 0 the requested
     /// size is kept, snapped to the resize increments. A layer surface has no states and no
     /// decorations.
-    pub fn configure_layer(&mut self, configure: LayerSurfaceConfigure) -> bool {
+    /// A layer surface's configure: its size is applied (with no `set_size` back), and it
+    /// ends the size request in flight (rinch patch). Answers whether the size changed, and
+    /// the marker generation of a held request it sent out, which the caller commits.
+    pub fn configure_layer(&mut self, configure: LayerSurfaceConfigure) -> (bool, Option<u64>) {
         // NOTE: when using fractional scaling or wl_compositor@v6 the scaling
         // should be delivered before the first configure, thus apply it to
         // properly scale the physical sizes provided by the users.
@@ -236,21 +239,14 @@ impl WindowState {
             ),
         };
 
-        if let WindowType::Layer { last_configure, .. } = &mut self.window {
-            // NOTE: `None` is present for the initial configure, thus we must always resize.
-            let initial = last_configure.is_none();
-            *last_configure = Some(configure);
-
-            if initial || new_size != self.surface_size() {
-                self.resize(new_size);
-                true
-            } else {
-                false
-            }
-        } else {
+        let WindowType::Layer { last_configure, .. } = &mut self.window else {
             tracing::error!("configure_layer called for a window that is not a layer surface");
-            false
-        }
+            return (false, None);
+        };
+        // NOTE: `None` is present for the initial configure, thus we must always resize.
+        let initial = last_configure.is_none();
+        *last_configure = Some(configure);
+        self.layer_step(|asks, assigned| asks.configured(new_size, assigned), initial)
     }
 
     /// Update the last-received configure and resize if necessary.

@@ -17,7 +17,7 @@ use winit_core::window::{
 };
 
 use crate::window::Handles;
-use crate::window::state::WindowState;
+use crate::window::state::{SizeAnswer, WindowState};
 
 #[derive(Debug)]
 pub(crate) struct WindowCommon {
@@ -75,9 +75,29 @@ impl WindowCommon {
 
     pub(crate) fn request_surface_size(&self, size: Size) -> Option<PhysicalSize<u32>> {
         let mut s = self.state.lock().unwrap();
-        let new_size = s.request_surface_size(size);
-        self.request_redraw();
-        Some(new_size)
+        match s.request_surface_size(size) {
+            SizeAnswer::Applied(new_size) => {
+                drop(s);
+                self.request_redraw();
+                Some(new_size)
+            },
+            // A layer surface: its configure applies the size (rinch patch). A request that
+            // went out now is committed at once, and its marker started.
+            SizeAnswer::Asked { marker } => {
+                if let Some(generation) = marker {
+                    s.window.wl_surface().commit();
+                    self.display.sync(
+                        &self.handles.queue_handle,
+                        crate::types::layer_ask::LayerAskMarker {
+                            window_id: self.window_id,
+                            generation,
+                            stage: 1,
+                        },
+                    );
+                }
+                None
+            },
+        }
     }
 
     pub(crate) fn outer_size(&self) -> PhysicalSize<u32> {

@@ -33,6 +33,8 @@ pub enum WindowType {
         layer: LayerSurface,
         attributes: Box<LayerShellAttributes>,
         last_configure: Option<LayerSurfaceConfigure>,
+        /// Its size requests, one in flight at a time (rinch patch).
+        asks: crate::window::layer_asks::LayerAsks,
     },
 }
 
@@ -79,6 +81,17 @@ impl WindowType {
                 true
             },
             _ => false,
+        }
+    }
+}
+
+impl WindowType {
+    /// The role the surface was given: a popup's is reported as its toplevel's kind.
+    pub fn surface_role(&self) -> crate::window::layer_shell::WaylandSurfaceRole {
+        use crate::window::layer_shell::WaylandSurfaceRole;
+        match self {
+            Self::Layer { .. } => WaylandSurfaceRole::LayerShell,
+            Self::Window { .. } | Self::Popup { .. } => WaylandSurfaceRole::XdgToplevel,
         }
     }
 }

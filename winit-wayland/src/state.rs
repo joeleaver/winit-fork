@@ -312,6 +312,25 @@ impl WinitState {
         }
     }
 
+    /// A layer surface's size changed outside a configure handler (its size request's
+    /// marker applied the compositor's last word, rinch patch): report it as a resize, and
+    /// ask for a redraw at the new size.
+    pub fn queue_resize(&mut self, window_id: WindowId) {
+        let updates = &mut self.window_compositor_updates;
+        let pos = match updates.iter().position(|update| update.window_id == window_id) {
+            Some(pos) => pos,
+            None => {
+                updates.push(WindowCompositorUpdate::new(window_id));
+                updates.len() - 1
+            },
+        };
+        updates[pos].resized = true;
+        if let Some(requests) = self.window_requests.get_mut().get(&window_id) {
+            requests.redraw_requested.store(true, Ordering::Relaxed);
+        }
+        self.dispatched_events = true;
+    }
+
     pub fn queue_close(updates: &mut Vec<WindowCompositorUpdate>, window_id: WindowId) {
         let pos = if let Some(pos) = updates.iter().position(|update| update.window_id == window_id)
         {
@@ -400,13 +419,14 @@ impl LayerShellHandler for WinitState {
 
     fn configure(
         &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
+        conn: &Connection,
+        qh: &QueueHandle<Self>,
         layer: &LayerSurface,
         configure: LayerSurfaceConfigure,
         _serial: u32,
     ) {
-        // sctk acks the configure; the size is applied like an xdg window's.
+        // sctk acks the configure; the size is applied like an xdg window's, with no
+        // `set_size` back, and it ends the size request in flight (rinch patch).
         let window_id = super::make_wid(layer.wl_surface());
         let Some(window) = self.windows.get_mut().get_mut(&window_id) else {
             tracing::debug!("got configure for dead window {window_id:?}, ignoring it");
@@ -422,8 +442,13 @@ impl LayerShellHandler for WinitState {
             self.window_compositor_updates.len() - 1
         };
 
-        self.window_compositor_updates[index].resized |=
-            window.lock().unwrap().configure_layer(configure);
+        let (resized, marker) = window.lock().unwrap().configure_layer(configure);
+        self.window_compositor_updates[index].resized |= resized;
+        // A held size request went out: commit it and start its marker.
+        if let Some(generation) = marker {
+            layer.wl_surface().commit();
+            crate::types::layer_ask::LayerAskMarker::start(conn, qh, window_id, generation);
+        }
 
         // NOTE: configure demands wl_surface::commit, however winit doesn't commit on behalf of the
         // users, since it can break a lot of things, thus it'll ask users to redraw instead.

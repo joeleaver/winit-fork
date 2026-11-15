@@ -36,6 +36,7 @@ use crate::state::WinitState;
 use crate::types::bgr_effects::{BgrEffectManager, SurfaceBlurEffect};
 use crate::types::cursor::SelectedCursor;
 use crate::types::xdg_toplevel_icon_manager::ToplevelIcon;
+use crate::window::layer_asks::{Ask, LayerAsks, Marker, Step};
 use crate::{ActiveEventLoop, logical_to_physical_rounded, output};
 
 mod configure;
@@ -56,6 +57,28 @@ pub type WinitFrame = sctk::shell::xdg::fallback_frame::FallbackFrame<WinitState
 
 // Minimum window surface size.
 const MIN_WINDOW_SIZE: LogicalSize<u32> = LogicalSize::new(2, 1);
+
+/// What a layer surface's marker sync led to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkerDone {
+    /// Send the second sync.
+    SyncAgain,
+    /// The request ended: whether the size changed, and a request that went out (its
+    /// marker generation), which the caller commits.
+    Ended { resized: bool, marker: Option<u64> },
+    /// Nothing.
+    Nothing,
+}
+
+/// What a size request did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SizeAnswer {
+    /// Applied now: the window's size.
+    Applied(PhysicalSize<u32>),
+    /// Asked of the compositor, whose configure applies it (a layer surface). With a
+    /// marker generation when a request went out now: the caller commits and starts it.
+    Asked { marker: Option<u64> },
+}
 
 /// The parent of a window or popup.
 pub struct WindowParent {
@@ -497,8 +520,33 @@ impl WindowState {
         }
     }
 
-    /// Try to resize the window when the user can do so.
-    pub fn request_surface_size(&mut self, surface_size: Size) -> PhysicalSize<u32> {
+    /// Try to resize the window when the user can do so. A toplevel or a popup is resized at
+    /// once, as upstream; a layer surface asks the compositor, one request in flight at a
+    /// time, and takes the size the compositor answers with
+    /// ([`crate::window::layer_asks`], rinch patch).
+    pub fn request_surface_size(&mut self, surface_size: Size) -> SizeAnswer {
+        let asks_for_it = crate::window::layer_asks::asks_for_its_size(self.window.surface_role());
+        if let (true, WindowType::Layer { attributes, asks, layer, .. }) =
+            (asks_for_it, &mut self.window)
+        {
+            let assigned = attributes.assigned_axes();
+            let mut size: LogicalSize<u32> = surface_size.to_logical(self.scale_factor);
+            if assigned.0 {
+                size.width = self.size.width;
+            }
+            if assigned.1 {
+                size.height = self.size.height;
+            }
+            return match asks.ask(size, self.size, assigned) {
+                Ask::Send(size, generation) => {
+                    let (width, height) = attributes.requested_size(size);
+                    layer.set_size(width, height);
+                    SizeAnswer::Asked { marker: Some(generation) }
+                },
+                Ask::Hold => SizeAnswer::Asked { marker: None },
+                Ask::Nothing => SizeAnswer::Applied(self.surface_size_physical()),
+            };
+        }
         match &self.window {
             WindowType::Window { last_configure, .. } => {
                 if last_configure.as_ref().map(Self::is_stateless).unwrap_or(true) {
@@ -513,36 +561,90 @@ impl WindowState {
                     winit_core::event_loop::AsyncRequestSerial::get(),
                 );
             },
-            // A layer surface has no states: its size is the client's, except on an axis the
-            // compositor assigns, which keeps the compositor's.
-            WindowType::Layer { attributes, .. } => {
-                let (width, height) = attributes.assigned_axes();
-                let mut size: LogicalSize<u32> = surface_size.to_logical(self.scale_factor());
-                if width {
-                    size.width = self.size.width;
-                }
-                if height {
-                    size.height = self.size.height;
-                }
-                self.resize(size)
-            },
+            WindowType::Layer { .. } => unreachable!("a layer surface's request is answered above"),
         }
 
-        self.surface_size_physical()
+        SizeAnswer::Applied(self.surface_size_physical())
+    }
+
+    /// A layer surface's marker sync is done (`stage` 1 or 2 of request `generation`): what
+    /// follows ([`crate::window::layer_asks`]). A request that goes out because of it has
+    /// had its `set_size` sent; the caller commits and starts its marker.
+    ///
+    /// Answers whether to send the second sync, and, when the request ended, whether the
+    /// size changed and the marker generation of a request that went out.
+    pub fn layer_marker_done(&mut self, generation: u64, stage: u8) -> MarkerDone {
+        let applied = self.size;
+        let WindowType::Layer { attributes, asks, .. } = &mut self.window else {
+            return MarkerDone::Nothing;
+        };
+        let assigned = attributes.assigned_axes();
+        match asks.marker_done(generation, stage, applied, assigned) {
+            Marker::SyncAgain => MarkerDone::SyncAgain,
+            Marker::Ignore => MarkerDone::Nothing,
+            Marker::Ended(step) => {
+                let (resized, marker) = self.layer_step(|_, _| step, false);
+                MarkerDone::Ended { resized, marker }
+            },
+        }
+    }
+
+    /// Do what a layer surface's size requests say follows (a configure, or a marker that
+    /// ended a request): apply a size (with no `set_size` back), send a request's
+    /// `set_size`. `force` applies the size even when unchanged (the first configure).
+    /// Answers whether the size changed, and the marker generation of a request sent.
+    pub(crate) fn layer_step(
+        &mut self,
+        step: impl FnOnce(&mut LayerAsks, (bool, bool)) -> Step,
+        force: bool,
+    ) -> (bool, Option<u64>) {
+        let WindowType::Layer { attributes, asks, .. } = &mut self.window else {
+            return (false, None);
+        };
+        let step = step(asks, attributes.assigned_axes());
+        let resized = match step.apply {
+            Some(size) if force || size != self.surface_size() => {
+                self.apply_configured_size(size);
+                true
+            },
+            _ => false,
+        };
+        let marker = step.send.map(|(size, generation)| {
+            if let WindowType::Layer { attributes, layer, .. } = &self.window {
+                let (width, height) = attributes.requested_size(size);
+                layer.set_size(width, height);
+            }
+            generation
+        });
+        (resized, marker)
     }
 
     /// Send a layer surface's size request again for its current size (nothing for any other
     /// role): after a change of anchors or compositor-size axes, which changes the axes that
     /// go out as 0. Applied with the next commit.
     pub(crate) fn send_layer_size(&self) {
-        if let WindowType::Layer { layer, attributes, .. } = &self.window {
-            let (width, height) = attributes.requested_size(self.size);
+        if let WindowType::Layer { layer, attributes, asks, .. } = &self.window {
+            // The newest unanswered request, not the applied size: sending that would
+            // replace the request with an older size (rinch patch).
+            let size = asks.newest_request().unwrap_or(self.size);
+            let (width, height) = attributes.requested_size(size);
             layer.set_size(width, height);
         }
     }
 
-    /// Resize the window to the new surface size.
+    /// Resize the window to the new surface size, at the client's request.
     fn resize(&mut self, surface_size: LogicalSize<u32>) {
+        self.resize_with(surface_size, true);
+    }
+
+    /// Resize the window to the size a configure gave it. For a layer surface no `set_size`
+    /// is sent: sending the configured size back would replace a newer request the client
+    /// made with the compositor's answer to an older one (rinch patch).
+    pub(crate) fn apply_configured_size(&mut self, surface_size: LogicalSize<u32>) {
+        self.resize_with(surface_size, false);
+    }
+
+    fn resize_with(&mut self, surface_size: LogicalSize<u32>, ask: bool) {
         self.size = surface_size;
 
         // Update the stateless size.
@@ -573,8 +675,10 @@ impl WindowState {
         // Set the window geometry, or a layer surface's size.
         match &self.window {
             WindowType::Layer { layer, attributes, .. } => {
-                let (width, height) = attributes.requested_size(outer_size);
-                layer.set_size(width, height)
+                if ask {
+                    let (width, height) = attributes.requested_size(outer_size);
+                    layer.set_size(width, height)
+                }
             },
             window => {
                 if let Some(xdg_surface) = window.xdg_surface() {

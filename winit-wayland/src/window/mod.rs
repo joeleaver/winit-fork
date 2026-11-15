@@ -31,6 +31,7 @@ use crate::state::WinitState;
 use crate::window::common::WindowCommon;
 use crate::window::state::{WindowParent, WindowType};
 use crate::{WindowAttributesWayland, output};
+pub(crate) mod layer_asks;
 pub(crate) mod layer_shell;
 pub(crate) mod state;
 pub use state::WindowState;
@@ -219,8 +220,8 @@ impl Window {
                 if output.is_none() {
                     if let Some(id) = layer_attributes.output_id {
                         warn!(
-                            "no wl_output with global name {id}; the compositor picks the \
-                             layer surface's output"
+                            "no wl_output with global name {id}; the compositor picks the layer \
+                             surface's output"
                         );
                     } else if layer_attributes.output_name.is_some() {
                         warn!(
@@ -248,6 +249,7 @@ impl Window {
                     layer,
                     attributes: Box::new(layer_attributes),
                     last_configure: None,
+                    asks: Default::default(),
                 }
             },
             _ => {
@@ -467,10 +469,7 @@ impl Window {
 
     /// The role the window's surface was given.
     pub(crate) fn surface_role(&self) -> WaylandSurfaceRole {
-        match self.common.state.lock().unwrap().window {
-            WindowType::Layer { .. } => WaylandSurfaceRole::LayerShell,
-            _ => WaylandSurfaceRole::XdgToplevel,
-        }
+        self.common.state.lock().unwrap().window.surface_role()
     }
 
     /// Change a layer surface's attributes (nothing for an xdg-toplevel) and commit them
