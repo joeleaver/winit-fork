@@ -31,6 +31,15 @@ pub struct Popup {
 }
 
 impl Popup {
+    /// See `WindowExtWayland::set_input_region`.
+    pub(crate) fn set_input_region(
+        &self,
+        rects: Option<&[(i32, i32, i32, i32)]>,
+        commit: bool,
+    ) -> Result<(), RequestError> {
+        self.common.set_input_region(rects, commit)
+    }
+
     pub(crate) fn new(
         event_loop_window_target: &ActiveEventLoop,
         mut attributes: WindowAttributes,

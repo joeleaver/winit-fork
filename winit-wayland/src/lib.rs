@@ -198,6 +198,24 @@ pub trait WindowExtWayland {
         positioner: Option<WindowPositioner>,
         size: Option<Size>,
     ) -> Result<AsyncRequestSerial, RequestError>;
+    /// Set the surface's input region (rinch patch): the union of `rects`, each `(x, y,
+    /// width, height)` in surface-local logical px, or the whole surface for `None` (the
+    /// default). An empty slice is an **empty** region, so every pointer and touch event
+    /// over the surface goes to whatever is below it. A rect with no area is skipped.
+    ///
+    /// `wl_surface.set_input_region` is double-buffered: with `commit: false` the region
+    /// goes with the surface's next commit, which is the next frame the app presents, so a
+    /// region computed from a frame's layout is set just before that frame's present and
+    /// lands in the same commit as its buffer. With `commit: true` the surface is committed
+    /// at once (with the buffer already attached), for a change no new frame follows.
+    ///
+    /// Works for an xdg-toplevel, a layer surface and a popup. Fails with a not-supported
+    /// error on X11.
+    fn set_input_region(
+        &self,
+        rects: Option<&[(i32, i32, i32, i32)]>,
+        commit: bool,
+    ) -> Result<(), RequestError>;
 }
 
 impl WindowExtWayland for dyn CoreWindow + '_ {
@@ -264,6 +282,20 @@ impl WindowExtWayland for dyn CoreWindow + '_ {
             return Err(NotSupportedError::new("only a Wayland popup is repositioned").into());
         };
         popup.request_reposition(positioner, size)
+    }
+
+    fn set_input_region(
+        &self,
+        rects: Option<&[(i32, i32, i32, i32)]>,
+        commit: bool,
+    ) -> Result<(), RequestError> {
+        if let Some(window) = self.cast_ref::<Window>() {
+            return window.set_input_region(rects, commit);
+        }
+        if let Some(popup) = self.cast_ref::<Popup>() {
+            return popup.set_input_region(rects, commit);
+        }
+        Err(NotSupportedError::new("not a Wayland surface").into())
     }
 }
 

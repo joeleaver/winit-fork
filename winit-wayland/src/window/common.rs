@@ -306,6 +306,21 @@ impl WindowCommon {
         self.handles.set_cursor_hittest(self.state.lock().unwrap().window.wl_surface(), hittest)
     }
 
+    /// See `WindowExtWayland::set_input_region`.
+    pub(crate) fn set_input_region(
+        &self,
+        rects: Option<&[(i32, i32, i32, i32)]>,
+        commit: bool,
+    ) -> Result<(), RequestError> {
+        let state = self.state.lock().unwrap();
+        let surface = state.window.wl_surface();
+        self.handles.set_input_region(surface, rects)?;
+        if commit {
+            surface.commit();
+        }
+        Ok(())
+    }
+
     pub(crate) fn current_monitor(&self) -> Option<CoreMonitorHandle> {
         self.state.lock().unwrap().current_monitor()
     }

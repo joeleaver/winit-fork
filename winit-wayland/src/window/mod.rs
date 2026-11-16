@@ -467,6 +467,15 @@ impl Window {
         self.common.xdg_toplevel()
     }
 
+    /// See `WindowExtWayland::set_input_region`.
+    pub(crate) fn set_input_region(
+        &self,
+        rects: Option<&[(i32, i32, i32, i32)]>,
+        commit: bool,
+    ) -> Result<(), RequestError> {
+        self.common.set_input_region(rects, commit)
+    }
+
     /// The role the window's surface was given.
     pub(crate) fn surface_role(&self) -> WaylandSurfaceRole {
         self.common.state.lock().unwrap().window.surface_role()

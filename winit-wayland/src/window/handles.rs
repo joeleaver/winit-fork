@@ -119,6 +119,28 @@ impl Handles {
             Ok(())
         }
     }
+    /// Set `surface`'s input region to the union of `rects` (surface-local logical px:
+    /// x, y, width, height), or to the whole surface for `None`. An empty slice is an
+    /// empty region: the surface takes no pointer input at all. Not committed: the
+    /// region is double-buffered state and goes with the surface's next commit.
+    pub(crate) fn set_input_region(
+        &self,
+        surface: &WlSurface,
+        rects: Option<&[(i32, i32, i32, i32)]>,
+    ) -> Result<(), RequestError> {
+        let Some(rects) = rects else {
+            surface.set_input_region(None);
+            return Ok(());
+        };
+        let region = Region::new(&*self.compositor).map_err(|err| os_error!(err))?;
+        for &(x, y, width, height) in rects {
+            if width > 0 && height > 0 {
+                region.add(x, y, width, height);
+            }
+        }
+        surface.set_input_region(Some(region.wl_region()));
+        Ok(())
+    }
 }
 
 /// The request from the window to the event loop.
