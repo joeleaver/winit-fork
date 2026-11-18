@@ -74,10 +74,15 @@ impl WindowCommon {
     }
 
     pub(crate) fn request_surface_size(&self, size: Size) -> Option<PhysicalSize<u32>> {
-        let mut s = self.state.lock().unwrap();
-        match s.request_surface_size(size) {
+        let answer = self.state.lock().unwrap().request_surface_size(size);
+        self.size_answered(answer)
+    }
+
+    /// What follows a size request's `answer`, with the state's lock released: a layer
+    /// surface's request that went out starts its marker (rinch patch).
+    pub(crate) fn size_answered(&self, answer: SizeAnswer) -> Option<PhysicalSize<u32>> {
+        match answer {
             SizeAnswer::Applied { size: new_size, marker } => {
-                drop(s);
                 // A layer surface's request that went out (committed): start its marker
                 // (rinch patch).
                 if let Some(generation) = marker {

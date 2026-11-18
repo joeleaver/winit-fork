@@ -525,37 +525,8 @@ impl WindowState {
     /// time: a request that goes out is applied at once, and one made while another is in
     /// flight is held ([`crate::window::layer_asks`], rinch patch).
     pub fn request_surface_size(&mut self, surface_size: Size) -> SizeAnswer {
-        let asks_for_it = crate::window::layer_asks::asks_for_its_size(self.window.surface_role());
-        if let (true, WindowType::Layer { attributes, asks, layer, .. }) =
-            (asks_for_it, &mut self.window)
-        {
-            let assigned = attributes.assigned_axes();
-            let mut size: LogicalSize<u32> = surface_size.to_logical(self.scale_factor);
-            if assigned.0 {
-                size.width = self.size.width;
-            }
-            if assigned.1 {
-                size.height = self.size.height;
-            }
-            return match asks.ask(size, self.size, assigned) {
-                Ask::Send(size, generation) => {
-                    // Sent and committed first, then applied: the commit carries only
-                    // `set_size`, and the size's other state (the viewport destination)
-                    // goes with the frame drawn at it.
-                    let (width, height) = attributes.requested_size(size);
-                    layer.set_size(width, height);
-                    self.window.wl_surface().commit();
-                    self.apply_configured_size(size);
-                    SizeAnswer::Applied {
-                        size: self.surface_size_physical(),
-                        marker: Some(generation),
-                    }
-                },
-                Ask::Hold => SizeAnswer::Held,
-                Ask::Nothing => {
-                    SizeAnswer::Applied { size: self.surface_size_physical(), marker: None }
-                },
-            };
+        if let Some(ask) = self.ask_layer_size(surface_size) {
+            return self.answer_layer_ask(ask, false);
         }
         match &self.window {
             WindowType::Window { last_configure, .. } => {
@@ -575,6 +546,60 @@ impl WindowState {
         }
 
         SizeAnswer::Applied { size: self.surface_size_physical(), marker: None }
+    }
+
+    /// The layer surface's half of a size request (rinch patch): what its asks say to do with
+    /// `surface_size` ([`LayerAsks::ask`]), nothing sent yet ([`Self::answer_layer_ask`] sends
+    /// it). `None` for a surface that is resized at once (a toplevel, a popup).
+    pub(crate) fn ask_layer_size(&mut self, surface_size: Size) -> Option<Ask> {
+        let asks_for_it = crate::window::layer_asks::asks_for_its_size(self.window.surface_role());
+        let (true, WindowType::Layer { attributes, asks, .. }) = (asks_for_it, &mut self.window)
+        else {
+            return None;
+        };
+        let assigned = attributes.assigned_axes();
+        let mut size: LogicalSize<u32> = surface_size.to_logical(self.scale_factor);
+        if assigned.0 {
+            size.width = self.size.width;
+        }
+        if assigned.1 {
+            size.height = self.size.height;
+        }
+        Some(asks.ask(size, self.size, assigned))
+    }
+
+    /// Carry out a layer surface's `ask` ([`Self::ask_layer_size`]) (rinch patch). A request
+    /// that goes out is sent and committed first, then applied: the commit carries its
+    /// `set_size` (and whatever else was set on the layer surface since its last commit), and
+    /// the size's other state (the viewport destination) goes with the frame drawn at it.
+    ///
+    /// `layer_changed` says the caller changed other layer-surface state with this request
+    /// ([`crate::WindowExtWayland::set_layer_shell_changes_and_size`]), which then goes in
+    /// the same commit: with the request, or on its own (with the newest request's
+    /// `set_size`, as [`Self::send_layer_size`] sends it) when nothing goes out.
+    pub(crate) fn answer_layer_ask(&mut self, ask: Ask, layer_changed: bool) -> SizeAnswer {
+        match ask {
+            Ask::Send(size, generation) => {
+                if let WindowType::Layer { attributes, layer, .. } = &self.window {
+                    let (width, height) = attributes.requested_size(size);
+                    layer.set_size(width, height);
+                }
+                self.window.wl_surface().commit();
+                self.apply_configured_size(size);
+                SizeAnswer::Applied { size: self.surface_size_physical(), marker: Some(generation) }
+            },
+            Ask::Hold | Ask::Nothing => {
+                if layer_changed {
+                    // New anchors or compositor-size axes can change which axes are sent as 0.
+                    self.send_layer_size();
+                    self.window.wl_surface().commit();
+                }
+                match ask {
+                    Ask::Hold => SizeAnswer::Held,
+                    _ => SizeAnswer::Applied { size: self.surface_size_physical(), marker: None },
+                }
+            },
+        }
     }
 
     /// A layer surface's marker sync is done (`stage` 1 or 2 of request `generation`): what

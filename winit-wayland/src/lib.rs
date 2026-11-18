@@ -184,6 +184,23 @@ pub trait WindowExtWayland {
     /// for [`Self::set_layer_shell_margins`].
     fn set_layer_shell_changes(&self, changes: LayerShellChanges);
 
+    /// [`Self::set_layer_shell_changes`] and a size request (`request_surface_size`) in
+    /// **one** commit (rinch patch): the compositor sees a bar's new edge, zone and height
+    /// as one change, with no state in between. `request_surface_size` on a layer surface
+    /// commits its `set_size` at once, so calling the two one after the other is two
+    /// commits, in either order.
+    ///
+    /// The size is read against the new anchors and answered as `request_surface_size`
+    /// answers it, and so is the return value: the new size when it was applied now, `None`
+    /// when it is held behind a request in flight (it comes as a `SurfaceResized` then) or
+    /// when `size` is `None`. On a surface that is not a layer surface the changes are
+    /// ignored and the size is requested as `request_surface_size` requests it.
+    fn set_layer_shell_changes_and_size(
+        &self,
+        changes: LayerShellChanges,
+        size: Option<Size>,
+    ) -> Option<PhysicalSize<u32>>;
+
     /// Re-place a [`WindowType::Popup`] with a new `positioner` and/or at a new `size`, in one
     /// `xdg_popup.reposition` (rinch patch). The serial returned comes back in
     /// `WindowEvent::PopupRepositioned` once the compositor has applied it, after the
@@ -270,6 +287,19 @@ impl WindowExtWayland for dyn CoreWindow + '_ {
     fn set_layer_shell_changes(&self, changes: LayerShellChanges) {
         if let Some(window) = self.cast_ref::<Window>() {
             window.update_layer_shell(|layer| layer.set_changes(changes));
+        }
+    }
+
+    fn set_layer_shell_changes_and_size(
+        &self,
+        changes: LayerShellChanges,
+        size: Option<Size>,
+    ) -> Option<PhysicalSize<u32>> {
+        match self.cast_ref::<Window>() {
+            Some(window) => {
+                window.update_layer_shell_and_size(|layer| layer.set_changes(changes), size)
+            },
+            None => size.and_then(|size| self.request_surface_size(size)),
         }
     }
 

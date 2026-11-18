@@ -489,12 +489,35 @@ impl Window {
     /// pushes `WindowEvent::Moved` into the event stream once the compositor has the move
     /// (see [`crate::types::layer_move`]).
     pub(crate) fn update_layer_shell(&self, update: impl FnOnce(&mut LayerShellAttributes)) {
+        self.update_layer_shell_and_size(update, None);
+    }
+
+    /// [`Self::update_layer_shell`] with a size request in the **same** commit (rinch patch;
+    /// `WindowExtWayland::set_layer_shell_changes_and_size`). The request is asked after the
+    /// update, so it is read against the new anchors, and answered as
+    /// `request_surface_size` answers it; on a surface that is not a layer surface the update
+    /// does nothing and the size is requested as `request_surface_size` requests it.
+    pub(crate) fn update_layer_shell_and_size(
+        &self,
+        update: impl FnOnce(&mut LayerShellAttributes),
+        size: Option<Size>,
+    ) -> Option<PhysicalSize<u32>> {
         let mut window_state = self.common.state.lock().unwrap();
         let margins_were = window_state.window.layer_margins();
-        if window_state.window.update_layer(update) {
-            // New anchors or compositor-size axes can change which axes are sent as 0.
-            window_state.send_layer_size();
-            window_state.window.wl_surface().commit();
+        let changed = window_state.window.update_layer(update);
+        let answer = match size.and_then(|size| window_state.ask_layer_size(size)) {
+            Some(ask) => Some(window_state.answer_layer_ask(ask, changed)),
+            None => {
+                if changed {
+                    // New anchors or compositor-size axes can change which axes are sent
+                    // as 0.
+                    window_state.send_layer_size();
+                    window_state.window.wl_surface().commit();
+                }
+                None
+            },
+        };
+        if changed {
             let margins = window_state.window.layer_margins();
             if let Some(m) = margins.filter(|m| Some(*m) != margins_were) {
                 let scale = window_state.scale_factor();
@@ -508,6 +531,13 @@ impl Window {
                 };
                 self.common.display.sync(&self.common.handles.queue_handle, barrier);
             }
+        }
+        drop(window_state);
+        match (answer, size) {
+            (Some(answer), _) => self.common.size_answered(answer),
+            // Not a layer surface: resized as `request_surface_size` resizes it.
+            (None, Some(size)) => self.common.request_surface_size(size),
+            (None, None) => None,
         }
     }
 }
