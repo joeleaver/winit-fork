@@ -839,6 +839,9 @@ impl CoreWindow for Window {
 }
 
 #[cfg(test)]
+mod layer_commit_tests;
+
+#[cfg(test)]
 mod starting_scale_tests {
     //! The scale a new surface starts at (rinch#2652), against the stand-in compositor of
     //! `seat::released_tests`.

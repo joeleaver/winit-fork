@@ -53,4 +53,6 @@ features = ["dlopen", "serde", "csd-adwaita"]
 [dev-dependencies]
 # The stand-in compositor of `seat::released_tests` (rinch#2656).
 wayland-protocols = { version = "0.32.12", features = ["server"] }
+# The layer shell of `window::layer_commit_tests`' stand-in compositor (rinch#2829).
+wayland-protocols-wlr = { version = "0.3.12", features = ["server"] }
 wayland-server = "0.31"
