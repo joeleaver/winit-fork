@@ -91,7 +91,13 @@ impl EventLoop {
         }
 
         let connection = Connection::connect_to_env().map_err(|err| os_error!(err))?;
+        Self::with_connection(connection)
+    }
 
+    /// The event loop over an existing connection (rinch patch): what [`Self::new`] builds
+    /// once it has connected, without its once-per-process guard, so a test can run one per
+    /// stand-in compositor.
+    pub(crate) fn with_connection(connection: Connection) -> Result<EventLoop, EventLoopError> {
         let (globals, mut event_queue) =
             globals::registry_queue_init(&connection).map_err(|err| os_error!(err))?;
         let queue_handle = event_queue.handle();
@@ -174,6 +180,13 @@ impl EventLoop {
         };
 
         Ok(event_loop)
+    }
+
+    /// The loop's [`ActiveEventLoop`], for a test that makes windows without running the
+    /// loop (rinch patch).
+    #[cfg(test)]
+    pub(crate) fn active(&self) -> &ActiveEventLoop {
+        &self.active_event_loop
     }
 
     pub fn run_app_on_demand<A: ApplicationHandler>(
