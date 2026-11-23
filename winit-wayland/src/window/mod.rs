@@ -20,8 +20,8 @@ use winit_core::error::{CreateWindowError, InvalidInput, NotSupportedError, Requ
 use winit_core::event_loop::AsyncRequestSerial;
 use winit_core::monitor::{Fullscreen, MonitorHandle as CoreMonitorHandle};
 use winit_core::window::{
-    CursorGrabMode, ImeCapabilities, ImeRequest, ImeRequestError, ResizeDirection, Theme,
-    UserAttentionType, Window as CoreWindow, WindowAttributes, WindowButtons, WindowId,
+    ActivationToken, CursorGrabMode, ImeCapabilities, ImeRequest, ImeRequestError, ResizeDirection,
+    Theme, UserAttentionType, Window as CoreWindow, WindowAttributes, WindowButtons, WindowId,
     WindowLevel,
 };
 
@@ -564,6 +564,15 @@ impl Window {
         xdg_activation_token.commit();
 
         Ok(serial)
+    }
+
+    /// See `WindowExtWayland::activate_with_token`.
+    pub(crate) fn activate_with_token(&self, token: ActivationToken) -> Result<(), RequestError> {
+        let Some(xdg_activation) = self.common.handles.xdg_activation.as_ref() else {
+            return Err(NotSupportedError::new("xdg_activation_v1 is not available").into());
+        };
+        xdg_activation.activate(token.into_raw(), self.surface());
+        Ok(())
     }
 
     #[inline]

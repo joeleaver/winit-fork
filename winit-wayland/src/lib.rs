@@ -233,6 +233,20 @@ pub trait WindowExtWayland {
         rects: Option<&[(i32, i32, i32, i32)]>,
         commit: bool,
     ) -> Result<(), RequestError>;
+
+    /// Activate the window with an xdg-activation `token` (rinch patch):
+    /// `xdg_activation_v1.activate(token, surface)` on the window's surface. This is what
+    /// [`WindowAttributesWayland::with_activation_token`] does at creation, for a window that
+    /// already exists, so a single-instance app can raise its running window with the token a
+    /// second launch received (`XDG_ACTIVATION_TOKEN`) and passed on.
+    ///
+    /// The compositor decides what the token is worth: focus, only urgency, or nothing for a
+    /// token it does not know or no longer honours. The protocol answers nothing either way, so
+    /// `Ok` says only that the request was sent.
+    ///
+    /// Works for an xdg-toplevel and a layer surface. Fails with a not-supported error for a
+    /// popup, on X11, and where the compositor has no `xdg_activation_v1`.
+    fn activate_with_token(&self, token: ActivationToken) -> Result<(), RequestError>;
 }
 
 impl WindowExtWayland for dyn CoreWindow + '_ {
@@ -326,6 +340,13 @@ impl WindowExtWayland for dyn CoreWindow + '_ {
             return popup.set_input_region(rects, commit);
         }
         Err(NotSupportedError::new("not a Wayland surface").into())
+    }
+
+    fn activate_with_token(&self, token: ActivationToken) -> Result<(), RequestError> {
+        match self.cast_ref::<Window>() {
+            Some(window) => window.activate_with_token(token),
+            None => Err(NotSupportedError::new("not a Wayland window").into()),
+        }
     }
 }
 
