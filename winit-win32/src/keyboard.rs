@@ -63,10 +63,19 @@ pub struct MessageAsKeyEvent {
 pub struct KeyEventBuilder {
     event_info: Mutex<Option<PartialKeyEventInfo>>,
     pending: PendingEventQueue<MessageAsKeyEvent>,
+    /// A high surrogate that ended the previous press's WM_CHAR text, waiting for the low
+    /// surrogate that completes it. `SendInput` with `KEYEVENTF_UNICODE` delivers a character
+    /// outside the BMP as two `VK_PACKET` presses, one UTF-16 code unit each, so neither press
+    /// alone holds a character (rinch#2850). See [`pair_split_surrogates`].
+    pending_high_surrogate: Mutex<Option<u16>>,
 }
 impl Default for KeyEventBuilder {
     fn default() -> Self {
-        KeyEventBuilder { event_info: Mutex::new(None), pending: Default::default() }
+        KeyEventBuilder {
+            event_info: Mutex::new(None),
+            pending: Default::default(),
+            pending_high_surrogate: Mutex::new(None),
+        }
     }
 }
 impl KeyEventBuilder {
@@ -96,6 +105,8 @@ impl KeyEventBuilder {
                     MatchResult::MessagesToDispatch(self.pending.complete_multi(key_events))
                 },
                 WM_KILLFOCUS => {
+                    // A surrogate half buffered before focus left has lost its partner.
+                    *self.pending_high_surrogate.lock().unwrap() = None;
                     // synthesize keyup events
                     let kbd_state = get_kbd_state();
                     let key_events = Self::synthesize_kbd_state(ElementState::Released, &kbd_state);
@@ -222,6 +233,10 @@ impl KeyEventBuilder {
                                 return MatchResult::TokenToRemove(pending_token);
                             },
                         };
+                        pair_split_surrogates(
+                            &mut self.pending_high_surrogate.lock().unwrap(),
+                            &mut event_info.utf16parts,
+                        );
                         let mut layouts = LAYOUT_CACHE.lock().unwrap();
                         // It's okay to call `ToUnicode` here, because at this point the dead key
                         // is already consumed by the character.
@@ -631,6 +646,39 @@ impl PartialKeyEventInfo {
             repeat: self.is_repeat,
             text_with_all_modifiers: char_with_all_modifiers,
             key_without_modifiers: self.key_without_modifiers,
+        }
+    }
+}
+
+/// Joins a surrogate pair split across two presses (rinch#2850).
+///
+/// `SendInput` with `KEYEVENTF_UNICODE` sends a character outside the BMP (an emoji) as two
+/// `VK_PACKET` presses, the first with the high surrogate as its only WM_CHAR, the second with the
+/// low surrogate. Called once per press with that press's complete WM_CHAR text in `parts`:
+///
+/// - A high surrogate at the end of `parts` is moved into `pending`, so this press reports no text
+///   for it (half a pair is no character).
+/// - A low surrogate at the start of `parts` gets the pending high surrogate put in front of it, so
+///   the press that completes the pair reports the whole character.
+/// - Any other press drops what `pending` held. A lone surrogate is never joined to a later,
+///   unrelated one, and an unpaired surrogate left in `parts` makes the press's text `None` in
+///   `finalize`, as before; it does not panic.
+///
+/// A pair delivered within one press (two WM_CHARs, as a keyboard layout sends it) is untouched.
+fn pair_split_surrogates(pending: &mut Option<u16>, parts: &mut Vec<u16>) {
+    let is_high = |u: u16| (0xd800..=0xdbff).contains(&u);
+    let is_low = |u: u16| (0xdc00..=0xdfff).contains(&u);
+
+    let held = pending.take();
+    if let (Some(high), Some(&first)) = (held, parts.first()) {
+        if is_low(first) {
+            parts.insert(0, high);
+        }
+    }
+    if let Some(&last) = parts.last() {
+        // A high surrogate in last place has no low surrogate after it in this press.
+        if is_high(last) {
+            *pending = parts.pop();
         }
     }
 }
@@ -1261,4 +1309,77 @@ pub fn scancode_to_physicalkey(scancode: u32) -> PhysicalKey {
 
         _ => return PhysicalKey::Unidentified(NativeKeyCode::Windows(scancode as u16)),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pair_split_surrogates;
+
+    fn text(parts: &[u16]) -> Option<String> {
+        String::from_utf16(parts).ok().filter(|s| !s.is_empty())
+    }
+
+    /// U+1F600 as `SendInput` with `KEYEVENTF_UNICODE` sends it: one press per surrogate.
+    #[test]
+    fn a_pair_split_across_two_presses_is_reported_on_the_second() {
+        let mut pending = None;
+        let mut first = vec![0xd83d];
+        pair_split_surrogates(&mut pending, &mut first);
+        assert_eq!(text(&first), None, "half a pair is no text");
+        assert_eq!(pending, Some(0xd83d));
+
+        let mut second = vec![0xde00];
+        pair_split_surrogates(&mut pending, &mut second);
+        assert_eq!(text(&second).as_deref(), Some("\u{1F600}"));
+        assert_eq!(pending, None);
+    }
+
+    #[test]
+    fn a_pair_within_one_press_is_untouched() {
+        let mut pending = None;
+        let mut parts = "a\u{1F600}".encode_utf16().collect::<Vec<_>>();
+        pair_split_surrogates(&mut pending, &mut parts);
+        assert_eq!(text(&parts).as_deref(), Some("a\u{1F600}"));
+        assert_eq!(pending, None);
+    }
+
+    #[test]
+    fn a_lone_high_surrogate_is_dropped_by_the_next_press() {
+        let mut pending = None;
+        let mut high = vec![0xd83d];
+        pair_split_surrogates(&mut pending, &mut high);
+        let mut b = vec![u16::from(b'b')];
+        pair_split_surrogates(&mut pending, &mut b);
+        assert_eq!(text(&b).as_deref(), Some("b"));
+        assert_eq!(pending, None, "the high surrogate is not kept past an unrelated press");
+
+        // A low surrogate after that has nothing to join, and its press has no text.
+        let mut low = vec![0xde00];
+        pair_split_surrogates(&mut pending, &mut low);
+        assert_eq!(text(&low), None);
+    }
+
+    #[test]
+    fn a_lone_low_surrogate_has_no_text() {
+        let mut pending = None;
+        let mut low = vec![0xde00];
+        pair_split_surrogates(&mut pending, &mut low);
+        assert_eq!(low, vec![0xde00]);
+        assert_eq!(text(&low), None);
+        assert_eq!(pending, None);
+    }
+
+    /// Two emoji back to back, each split: the second's high surrogate is held after the first
+    /// completes.
+    #[test]
+    fn consecutive_split_pairs() {
+        let mut pending = None;
+        let mut out = String::new();
+        for unit in "\u{1F600}\u{1F44D}".encode_utf16() {
+            let mut parts = vec![unit];
+            pair_split_surrogates(&mut pending, &mut parts);
+            out.push_str(&text(&parts).unwrap_or_default());
+        }
+        assert_eq!(out, "\u{1F600}\u{1F44D}");
+    }
 }
